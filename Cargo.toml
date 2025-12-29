@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-sendspin = { git = "https://github.com/Sendspin/sendspin-rs" }
+sendspin = { git = "https://github.com/s3than/sendspin-rs" }
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
@@ -15,6 +15,4 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 futures-util = "0.3"
 tokio-tungstenite = "0.24"
-
-[patch."https://github.com/Sendspin/sendspin-rs"]
-sendspin = { path = "../sendspin-rs" }
+mdns-sd = "0.11"
