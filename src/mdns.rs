@@ -34,7 +34,12 @@ pub fn discover_sendspin_server() -> Result<String, Box<dyn std::error::Error>> 
                     let port = info.get_port();
                     let addresses = info.get_addresses();
 
-                    debug!("Found service: {} at {}:{}", info.get_fullname(), host, port);
+                    debug!(
+                        "Found service: {} at {}:{}",
+                        info.get_fullname(),
+                        host,
+                        port
+                    );
                     debug!("Addresses: {:?}", addresses);
 
                     // Prefer IPv4 address

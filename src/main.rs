@@ -127,9 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .as_micros() as i64;
     ws_tx
-        .send_message(Message::ClientTime(ClientTime {
-            client_transmitted,
-        }))
+        .send_message(Message::ClientTime(ClientTime { client_transmitted }))
         .await?;
 
     // Periodic time sync - need to use ProtocolClient::send_message in background task

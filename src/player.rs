@@ -15,9 +15,9 @@ use std::time::Duration;
 /// Player control commands
 #[derive(Debug, Clone)]
 pub enum PlaybackControl {
-    Stop,           // Clear queue and close output immediately
-    Resume,         // Allow playback to continue
-    SetVolume(u8),  // Set volume 0-100
+    Stop,          // Clear queue and close output immediately
+    Resume,        // Allow playback to continue
+    SetVolume(u8), // Set volume 0-100
 }
 
 /// Audio Player
@@ -29,8 +29,7 @@ pub struct Player {
 impl Player {
     /// Create a new player and spawn the playback thread
     pub fn new(initial_volume: u8) -> Self {
-        let audio_queue: Arc<Mutex<VecDeque<AudioBuffer>>> =
-            Arc::new(Mutex::new(VecDeque::new()));
+        let audio_queue: Arc<Mutex<VecDeque<AudioBuffer>>> = Arc::new(Mutex::new(VecDeque::new()));
         let queue_clone = Arc::clone(&audio_queue);
 
         let (control_tx, control_rx) = mpsc::channel::<PlaybackControl>();
