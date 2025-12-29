@@ -62,9 +62,21 @@ jobs:
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
-          sudo dpkg --add-architecture arm64
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu libasound2-dev:arm64
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          # Download and extract ARM64 ALSA headers manually
+          mkdir -p /tmp/alsa-arm64
+          cd /tmp/alsa-arm64
+          wget http://ports.ubuntu.com/pool/main/a/alsa-lib/libasound2-dev_1.2.11-1build2_arm64.deb
+          wget http://ports.ubuntu.com/pool/main/a/alsa-lib/libasound2_1.2.11-1build2_arm64.deb
+          ar x libasound2-dev_1.2.11-1build2_arm64.deb
+          tar xf data.tar.xz
+          ar x libasound2_1.2.11-1build2_arm64.deb
+          tar xf data.tar.xz
+          sudo cp -r usr/include/* /usr/aarch64-linux-gnu/include/
+          sudo cp -r usr/lib/aarch64-linux-gnu/* /usr/aarch64-linux-gnu/lib/
+          sudo mkdir -p /usr/lib/aarch64-linux-gnu/pkgconfig
+          sudo cp usr/lib/aarch64-linux-gnu/pkgconfig/alsa.pc /usr/lib/aarch64-linux-gnu/pkgconfig/
 
       - name: Cache cargo registry
         uses: actions/cache@v4
