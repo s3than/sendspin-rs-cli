@@ -75,7 +75,7 @@ pub fn discover_sendspin_server() -> Result<String, Box<dyn std::error::Error>> 
 
     // Drain any remaining messages from the channel, including SearchStopped
     while receiver.recv_timeout(Duration::from_millis(10)).is_ok() {}
-    
+
     // Shutdown and consume the final response to prevent error message
     if mdns.shutdown().is_ok() {
         // Try to receive the shutdown acknowledgment to prevent "closed channel" error

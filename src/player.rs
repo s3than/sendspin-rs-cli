@@ -244,7 +244,10 @@ mod tests {
         // Test all control commands send successfully
         assert!(player.control_tx.send(PlaybackControl::Stop).is_ok());
         assert!(player.control_tx.send(PlaybackControl::Resume).is_ok());
-        assert!(player.control_tx.send(PlaybackControl::SetVolume(80)).is_ok());
+        assert!(player
+            .control_tx
+            .send(PlaybackControl::SetVolume(80))
+            .is_ok());
     }
 
     #[test]
