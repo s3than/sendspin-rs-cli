@@ -89,8 +89,13 @@ jobs:
           echo "SDKROOT=${SDK_PATH}" >> "${GITHUB_ENV}"
           echo "MACOSX_DEPLOYMENT_TARGET=10.13" >> "${GITHUB_ENV}"
 
-          # Configure bindgen to use the SDK
-          echo "BINDGEN_EXTRA_CLANG_ARGS=-isysroot ${SDK_PATH}" >> "${GITHUB_ENV}"
+          # Find clang's builtin header path
+          CLANG_VERSION=$(clang --version | head -n1 | grep -oP '\d+\.\d+\.\d+' | head -n1)
+          CLANG_MAJOR=$(echo $CLANG_VERSION | cut -d. -f1)
+          CLANG_INCLUDE="/usr/lib/llvm-${CLANG_MAJOR}/lib/clang/${CLANG_MAJOR}/include"
+
+          # Configure bindgen to use both the SDK and clang's builtin headers
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-isysroot ${SDK_PATH} -I${CLANG_INCLUDE}" >> "${GITHUB_ENV}"
 
       - name: Install cross
         if: matrix.build_tool == 'cross'
