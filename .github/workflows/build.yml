@@ -76,13 +76,21 @@ jobs:
       - name: Setup macOS SDK for cross-compilation
         if: matrix.build_tool == 'zigbuild'
         run: |
+          # Install clang and dependencies
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev
+
           # Download macOS SDK
           wget -q https://github.com/joseluisq/macosx-sdks/releases/download/12.3/MacOSX12.3.sdk.tar.xz
           tar -xf MacOSX12.3.sdk.tar.xz
 
           # Set environment variables for the SDK
-          echo "SDKROOT=${PWD}/MacOSX12.3.sdk" >> "${GITHUB_ENV}"
+          SDK_PATH="${PWD}/MacOSX12.3.sdk"
+          echo "SDKROOT=${SDK_PATH}" >> "${GITHUB_ENV}"
           echo "MACOSX_DEPLOYMENT_TARGET=10.13" >> "${GITHUB_ENV}"
+
+          # Configure bindgen to use the SDK
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-isysroot ${SDK_PATH}" >> "${GITHUB_ENV}"
 
       - name: Install cross
         if: matrix.build_tool == 'cross'
