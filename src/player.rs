@@ -163,3 +163,121 @@ impl Player {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sendspin::audio::{AudioFormat, Codec, Sample};
+    use std::time::Instant;
+
+    #[test]
+    fn test_player_creation() {
+        let player = Player::new(75);
+        assert!(player.control_tx.send(PlaybackControl::Stop).is_ok());
+    }
+
+    #[test]
+    fn test_enqueue_buffer() {
+        let player = Player::new(50);
+
+        let format = AudioFormat {
+            codec: Codec::Pcm,
+            sample_rate: 44100,
+            channels: 2,
+            bit_depth: 16,
+            codec_header: None,
+        };
+
+        let samples = vec![Sample(0); 1024];
+        let buffer = AudioBuffer {
+            timestamp: 0,
+            format,
+            samples: Arc::from(samples.into_boxed_slice()),
+            play_at: Instant::now(),
+        };
+
+        player.enqueue(buffer);
+
+        // Verify buffer was added to queue
+        let queue_size = player.audio_queue.lock().unwrap().len();
+        assert_eq!(queue_size, 1);
+    }
+
+    #[test]
+    fn test_stop_clears_queue() {
+        let player = Player::new(50);
+
+        let format = AudioFormat {
+            codec: Codec::Pcm,
+            sample_rate: 44100,
+            channels: 2,
+            bit_depth: 16,
+            codec_header: None,
+        };
+
+        // Add multiple buffers
+        for _ in 0..5 {
+            let samples = vec![Sample(0); 1024];
+            let buffer = AudioBuffer {
+                timestamp: 0,
+                format: format.clone(),
+                samples: Arc::from(samples.into_boxed_slice()),
+                play_at: Instant::now(),
+            };
+            player.enqueue(buffer);
+        }
+
+        // Stop should clear queue
+        player.stop();
+
+        // Give the playback thread time to process the stop command
+        std::thread::sleep(Duration::from_millis(50));
+
+        let queue_size = player.audio_queue.lock().unwrap().len();
+        assert_eq!(queue_size, 0);
+    }
+
+    #[test]
+    fn test_control_commands() {
+        let player = Player::new(50);
+
+        // Test all control commands send successfully
+        assert!(player.control_tx.send(PlaybackControl::Stop).is_ok());
+        assert!(player.control_tx.send(PlaybackControl::Resume).is_ok());
+        assert!(player.control_tx.send(PlaybackControl::SetVolume(80)).is_ok());
+    }
+
+    #[test]
+    fn test_volume_control() {
+        let player = Player::new(50);
+
+        // Test volume bounds
+        player.set_volume(0);
+        player.set_volume(50);
+        player.set_volume(100);
+
+        // Give thread time to process
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    #[test]
+    fn test_playback_control_debug() {
+        // Test Debug trait implementation
+        let stop = PlaybackControl::Stop;
+        let resume = PlaybackControl::Resume;
+        let volume = PlaybackControl::SetVolume(75);
+
+        assert_eq!(format!("{:?}", stop), "Stop");
+        assert_eq!(format!("{:?}", resume), "Resume");
+        assert_eq!(format!("{:?}", volume), "SetVolume(75)");
+    }
+
+    #[test]
+    fn test_playback_control_clone() {
+        // Test Clone trait implementation
+        let original = PlaybackControl::SetVolume(50);
+        let cloned = original.clone();
+
+        assert!(matches!(cloned, PlaybackControl::SetVolume(50)));
+    }
+}

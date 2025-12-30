@@ -25,6 +25,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[derive(Parser, Debug)]
 #[command(name = "sendspin-rs-cli")]
 #[command(about = "Connect to Music Assistant and play audio", long_about = None)]
+#[command(version)]
 struct Args {
     #[arg(short, long)]
     server: Option<String>,

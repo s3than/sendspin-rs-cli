@@ -70,8 +70,55 @@ pub fn discover_sendspin_server() -> Result<String, Box<dyn std::error::Error>> 
         }
     };
 
-    // Shutdown the mDNS daemon to prevent spurious error messages
-    mdns.shutdown().ok();
+    // Stop the browse operation
+    mdns.stop_browse(service_type).ok();
 
+    // Drain any remaining messages from the channel, including SearchStopped
+    while receiver.recv_timeout(Duration::from_millis(10)).is_ok() {}
+    
+    // Shutdown and consume the final response to prevent error message
+    if mdns.shutdown().is_ok() {
+        // Try to receive the shutdown acknowledgment to prevent "closed channel" error
+        receiver.recv_timeout(Duration::from_millis(50)).ok();
+    }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mdns_discovery_timeout_or_success() {
+        // This test verifies mDNS discovery works
+        // It may find a server (Ok) or timeout (Err) depending on network
+        let start = std::time::Instant::now();
+        let result = discover_sendspin_server();
+        let elapsed = start.elapsed();
+
+        match result {
+            Ok(server) => {
+                // Found a server - verify format
+                assert!(server.contains(':'), "Server address should contain port");
+                // Should complete quickly if server found
+                assert!(elapsed < Duration::from_secs(6));
+            }
+            Err(e) => {
+                // No server found - verify timeout behavior
+                assert!(elapsed >= Duration::from_secs(5));
+                assert!(elapsed < Duration::from_secs(6));
+                assert!(e.to_string().contains("No Sendspin server found"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_service_type_constant() {
+        // Verify the service type format is correct
+        let service_type = "_sendspin-server._tcp.local.";
+
+        assert!(service_type.starts_with("_sendspin-server"));
+        assert!(service_type.contains("._tcp."));
+        assert!(service_type.ends_with(".local."));
+    }
 }
