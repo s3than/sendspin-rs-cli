@@ -51,8 +51,8 @@ fn test_binary_builds() {
         .output()
         .expect("Failed to build");
 
-    assert!(o
-        utput.status.success(),
+    assert!(
+        output.status.success(),
         "Build failed: {:?}",
         String::from_utf8_lossy(&output.stderr)
     );
