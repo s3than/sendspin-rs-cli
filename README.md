@@ -37,7 +37,7 @@ sendspin-rs-cli --version
 ### Build from Source
 
 Requirements:
-- Rust 1.70 or later
+- Rust 1.92 or later
 - ALSA development libraries (Linux only): `libasound2-dev`
 
 ```bash
