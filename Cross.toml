@@ -1,0 +1,9 @@
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "dpkg --add-architecture arm64",
+    "apt-get update",
+    "apt-get install -y libasound2-dev:arm64 pkg-config"
+]
+
+[target.x86_64-pc-windows-gnu]
+# Windows cross-compilation doesn't need ALSA
