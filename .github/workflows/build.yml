@@ -1,4 +1,4 @@
-name: Build
+name: Build and Release
 
 on:
   push:
@@ -7,48 +7,47 @@ on:
     branches: [ main ]
   release:
     types: [ created ]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  build-all:
     name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact_name: sendspin-rs-cli
-            asset_name: sendspin-rs-cli-linux-x86_64
+          # Linux builds
+          - target: x86_64-unknown-linux-gnu
+            artifact_name: sendspin-rs-cli-linux-amd64
+            build_tool: cargo
+            experimental: false
 
-          # Linux ARM64
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            artifact_name: sendspin-rs-cli
-            asset_name: sendspin-rs-cli-linux-arm64
-            cross: true
+          - target: aarch64-unknown-linux-gnu
+            artifact_name: sendspin-rs-cli-linux-arm64
+            build_tool: cross
+            experimental: false
 
-          # macOS x86_64
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact_name: sendspin-rs-cli
-            asset_name: sendspin-rs-cli-macos-x86_64
+          # macOS builds (cross-compiled with zigbuild)
+          - target: x86_64-apple-darwin
+            artifact_name: sendspin-rs-cli-darwin-amd64
+            build_tool: zigbuild
+            experimental: true
 
-          # macOS ARM64 (Apple Silicon)
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact_name: sendspin-rs-cli
-            asset_name: sendspin-rs-cli-macos-arm64
+          - target: aarch64-apple-darwin
+            artifact_name: sendspin-rs-cli-darwin-arm64
+            build_tool: zigbuild
+            experimental: true
 
-          # Windows x86_64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: sendspin-rs-cli.exe
-            asset_name: sendspin-rs-cli-windows-x86_64.exe
+          # Windows build
+          - target: x86_64-pc-windows-gnu
+            artifact_name: sendspin-rs-cli-windows-amd64.exe
+            build_tool: cross
+            experimental: false
 
     steps:
       - name: Checkout code
@@ -59,79 +58,84 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+      - name: Install ALSA development libraries (Linux native)
+        if: matrix.build_tool == 'cargo' && runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - name: Install Zig
+        if: matrix.build_tool == 'zigbuild'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          # Download and extract ARM64 ALSA headers manually
-          mkdir -p /tmp/alsa-arm64
-          cd /tmp/alsa-arm64
-          wget http://ports.ubuntu.com/pool/main/a/alsa-lib/libasound2-dev_1.2.11-1build2_arm64.deb
-          wget http://ports.ubuntu.com/pool/main/a/alsa-lib/libasound2_1.2.11-1build2_arm64.deb
-          ar x libasound2-dev_1.2.11-1build2_arm64.deb
-          tar xf data.tar.xz
-          ar x libasound2_1.2.11-1build2_arm64.deb
-          tar xf data.tar.xz
-          sudo cp -r usr/include/* /usr/aarch64-linux-gnu/include/
-          sudo cp -r usr/lib/aarch64-linux-gnu/* /usr/aarch64-linux-gnu/lib/
-          sudo mkdir -p /usr/lib/aarch64-linux-gnu/pkgconfig
-          sudo cp usr/lib/aarch64-linux-gnu/pkgconfig/alsa.pc /usr/lib/aarch64-linux-gnu/pkgconfig/
+          wget -q https://ziglang.org/download/0.11.0/zig-linux-x86_64-0.11.0.tar.xz
+          tar -xf zig-linux-x86_64-0.11.0.tar.xz
+          echo "${PWD}/zig-linux-x86_64-0.11.0" >> "${GITHUB_PATH}"
+
+      - name: Install cargo-zigbuild
+        if: matrix.build_tool == 'zigbuild'
+        run: cargo install cargo-zigbuild
+
+      - name: Install cross
+        if: matrix.build_tool == 'cross'
+        run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ matrix.build_tool }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.build_tool }}-cargo-registry-
 
       - name: Cache cargo index
         uses: actions/cache@v4
         with:
           path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ matrix.build_tool }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.build_tool }}-cargo-git-
 
-      - name: Cache cargo build
+      - name: Cache target directory
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ matrix.build_tool }}-${{ matrix.target }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.build_tool }}-${{ matrix.target }}-cargo-target-
 
-      - name: Install ALSA development libraries (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-
-      - name: Build binary
-        if: matrix.cross != true
+      - name: Build release binary (native cargo)
+        if: matrix.build_tool == 'cargo'
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Build binary (cross-compile)
-        if: matrix.cross == true
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          PKG_CONFIG_ALLOW_CROSS: 1
-          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Build release binary (cross)
+        if: matrix.build_tool == 'cross'
+        run: cross build --release --target ${{ matrix.target }}
 
-      - name: Strip binary (Linux/macOS)
-        if: runner.os != 'Windows'
-        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+      - name: Build release binary (zigbuild)
+        if: matrix.build_tool == 'zigbuild'
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+
+      - name: Prepare binary for upload
+        run: |
+          mkdir -p artifacts
+          # Determine binary name (with or without .exe)
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            BINARY_NAME="sendspin-rs-cli.exe"
+          else
+            BINARY_NAME="sendspin-rs-cli"
+          fi
+
+          cp target/${{ matrix.target }}/release/${BINARY_NAME} artifacts/${{ matrix.artifact_name }}
+          chmod +x artifacts/${{ matrix.artifact_name }} || true
+
+          # Create checksums
+          cd artifacts
+          sha256sum ${{ matrix.artifact_name }} > ${{ matrix.artifact_name }}.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
-
-      - name: Upload release asset
-        if: github.event_name == 'release'
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
-          asset_name: ${{ matrix.asset_name }}
-          asset_content_type: application/octet-stream
+          name: ${{ matrix.artifact_name }}
+          path: artifacts/*
+          retention-days: 7
 
   test:
     name: Test
@@ -181,3 +185,76 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt -- --check
+
+  create-release:
+    name: Create GitHub Release
+    needs: build-all
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          # Flatten artifact directory structure
+          find release-artifacts -type f -exec cp {} release/ \;
+          ls -lh release/
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          body: |
+            ## Sendspin Rust CLI
+
+            A Rust CLI audio player that connects to Music Assistant and plays synchronized audio.
+
+            ### Installation
+
+            Download the appropriate binary for your platform:
+
+            - **Linux AMD64**: `sendspin-rs-cli-linux-amd64`
+            - **Linux ARM64**: `sendspin-rs-cli-linux-arm64`
+            - **macOS Intel**: `sendspin-rs-cli-darwin-amd64`
+            - **macOS Apple Silicon**: `sendspin-rs-cli-darwin-arm64`
+            - **Windows**: `sendspin-rs-cli-windows-amd64.exe`
+
+            ```bash
+            # Example installation (Linux AMD64)
+            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/sendspin-rs-cli-linux-amd64
+            chmod +x sendspin-rs-cli-linux-amd64
+            sudo mv sendspin-rs-cli-linux-amd64 /usr/local/bin/sendspin-rs-cli
+
+            # Verify installation
+            sendspin-rs-cli --help
+            ```
+
+            ### Verify Checksums
+
+            SHA256 checksums are provided for each binary:
+
+            ```bash
+            sha256sum -c sendspin-rs-cli-linux-amd64.sha256
+            ```
+
+            ### Usage
+
+            ```bash
+            # Auto-discover server via mDNS
+            sendspin-rs-cli
+
+            # Or specify server manually
+            sendspin-rs-cli --server 192.168.1.100:8927
+
+            # Custom player name and volume
+            sendspin-rs-cli --name "Living Room" --volume 50
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
