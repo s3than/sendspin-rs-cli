@@ -73,6 +73,30 @@ jobs:
         if: matrix.build_tool == 'zigbuild'
         run: cargo install cargo-zigbuild
 
+      - name: Setup macOS SDK for cross-compilation
+        if: matrix.build_tool == 'zigbuild'
+        run: |
+          # Install clang and dependencies
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev
+
+          # Download macOS SDK
+          wget -q https://github.com/joseluisq/macosx-sdks/releases/download/12.3/MacOSX12.3.sdk.tar.xz
+          tar -xf MacOSX12.3.sdk.tar.xz
+
+          # Set environment variables for the SDK
+          SDK_PATH="${PWD}/MacOSX12.3.sdk"
+          echo "SDKROOT=${SDK_PATH}" >> "${GITHUB_ENV}"
+          echo "MACOSX_DEPLOYMENT_TARGET=10.13" >> "${GITHUB_ENV}"
+
+          # Find clang's builtin header path
+          CLANG_VERSION=$(clang --version | head -n1 | grep -oP '\d+\.\d+\.\d+' | head -n1)
+          CLANG_MAJOR=$(echo $CLANG_VERSION | cut -d. -f1)
+          CLANG_INCLUDE="/usr/lib/llvm-${CLANG_MAJOR}/lib/clang/${CLANG_MAJOR}/include"
+
+          # Configure bindgen to use both the SDK and clang's builtin headers
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-isysroot ${SDK_PATH} -I${CLANG_INCLUDE}" >> "${GITHUB_ENV}"
+
       - name: Install cross
         if: matrix.build_tool == 'cross'
         run: cargo install cross --git https://github.com/cross-rs/cross
