@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-sendspin = { git = "https://github.com/s3than/sendspin-rs" }
+sendspin = "0.1.2"
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
