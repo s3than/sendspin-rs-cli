@@ -281,11 +281,11 @@ This project is licensed under the Apache License - see the LICENSE file for det
 ## Acknowledgments
 
 - [Music Assistant](https://music-assistant.io/) - The music management system this player connects to
-- [sendspin-rs](https://github.com/s3than/sendspin-rs) - Core Sendspin protocol library * currently a forked library with various forks from the upstream merged in advanced.
+- [sendspin-rs](https://github.com/Sendspin/sendspin-rs) - Core Sendspin protocol library
 - [cpal](https://github.com/RustAudio/cpal) - Cross-platform audio library
 
 ## Links
 
 - **GitHub Repository**: https://github.com/s3than/sendspin-rs-cli
 - **Music Assistant**: https://music-assistant.io/
-- **Sendspin Protocol**: https://github.com/s3than/sendspin-rs
+- **Sendspin Protocol**: https://github.com/Sendspin/sendspin-rs
