@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_tungstenite::{
-    connect_async, tungstenite::Message as WsMessage, MaybeTlsStream, WebSocketStream,
+    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message as WsMessage,
 };
 
 /// WebSocket sender wrapper (local version for compatibility)
@@ -74,6 +74,9 @@ pub async fn connect_with_compat(
                                 "Connected to server: {} ({})",
                                 server_hello.name, server_hello.server_id
                             );
+                            info!("  Protocol version: {}", server_hello.version);
+                            info!("  Active roles: {}", server_hello.active_roles.join(", "));
+                            info!("  Connection reason: {:?}", server_hello.connection_reason);
                             break;
                         }
                         _ => {
@@ -194,7 +197,7 @@ async fn message_router(
                         let _ = message_tx.send(msg);
                     }
                     Err(e) => {
-                        debug!("Failed to parse message: {}", e);
+                        debug!("Failed to parse message: {} — raw: {}", e, text);
                     }
                 }
             }
