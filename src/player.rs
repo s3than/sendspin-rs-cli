@@ -5,11 +5,14 @@
 // - Time-synced playback
 // - Volume control (software scaling)
 // - Stop/Resume commands
+// - Native device format output (avoids ALSA resampling)
 
-use log::{error, info};
-use sendspin::audio::{AudioBuffer, AudioOutput, CpalOutput, Sample};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use log::{error, info, warn};
+use sendspin::audio::{AudioBuffer, AudioFormat, Sample};
 use std::collections::VecDeque;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 
 /// Player control commands
@@ -20,29 +23,226 @@ pub enum PlaybackControl {
     SetVolume(u8), // Set volume 0-100
 }
 
+/// Audio output that uses the device's native format to avoid ALSA resampling.
+///
+/// On Asahi Linux the device reports F32 44100Hz, but incoming audio may be
+/// 48000Hz. This struct builds the cpal stream at the device's native rate
+/// and resamples in the audio callback if needed.
+struct NativeAudioOutput {
+    sample_tx: mpsc::SyncSender<Arc<[Sample]>>,
+    _stream: cpal::Stream,
+    _latency_micros: Arc<AtomicU64>,
+}
+
+impl NativeAudioOutput {
+    fn new(
+        input_format: AudioFormat,
+        audio_buffer_frames: u32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or("No output device available")?;
+
+        let default_config = device.default_output_config()?;
+        let device_sample_rate = default_config.sample_rate();
+        let device_channels = default_config.channels();
+        let device_sample_format = default_config.sample_format();
+
+        info!(
+            "Device native: {:?} {}Hz {}ch",
+            device_sample_format, device_sample_rate, device_channels
+        );
+        info!(
+            "Input format: {}Hz {}ch {}bit",
+            input_format.sample_rate, input_format.channels, input_format.bit_depth
+        );
+
+        let input_rate = input_format.sample_rate;
+        let input_channels = input_format.channels as u16;
+        let needs_resample = input_rate != device_sample_rate as u32;
+
+        if needs_resample {
+            info!(
+                "Resampling {}Hz -> {}Hz in audio callback",
+                input_rate, device_sample_rate
+            );
+        }
+
+        // Build stream at the device's native config.
+        let buffer_size = if audio_buffer_frames == 0 {
+            cpal::BufferSize::Default
+        } else {
+            cpal::BufferSize::Fixed(audio_buffer_frames)
+        };
+        let config = cpal::StreamConfig {
+            channels: device_channels,
+            sample_rate: device_sample_rate,
+            buffer_size,
+        };
+
+        // Bounded channel for backpressure (~10 buffers)
+        let (sample_tx, sample_rx) = mpsc::sync_channel::<Arc<[Sample]>>(10);
+        let sample_rx = Mutex::new(sample_rx);
+
+        let latency_micros = Arc::new(AtomicU64::new(0));
+        let latency_clone = Arc::clone(&latency_micros);
+
+        // State for the audio callback
+        let mut current_buffer: Option<Arc<[Sample]>> = None;
+        let mut buffer_pos: usize = 0;
+        // Resampling state: fractional position in the input buffer
+        let device_rate_u32 = device_sample_rate as u32;
+        let ratio = if needs_resample {
+            input_rate as f64 / device_rate_u32 as f64
+        } else {
+            1.0
+        };
+        let mut resample_pos: f64 = 0.0;
+
+        let stream = device.build_output_stream(
+            &config,
+            move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                // Track latency
+                let ts = info.timestamp();
+                if let Some(latency) = ts.playback.duration_since(&ts.callback) {
+                    latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
+                }
+
+                for sample_out in data.iter_mut() {
+                    // Ensure we have a buffer
+                    let need_new = match current_buffer {
+                        Some(ref buf) => {
+                            if needs_resample {
+                                // For resampling, check if fractional pos exceeds buffer
+                                let max_pos = buf.len() / input_channels as usize;
+                                resample_pos >= max_pos as f64
+                            } else {
+                                buffer_pos >= buf.len()
+                            }
+                        }
+                        None => true,
+                    };
+
+                    if need_new {
+                        if let Ok(rx) = sample_rx.lock() {
+                            if let Ok(buf) = rx.try_recv() {
+                                current_buffer = Some(buf);
+                                buffer_pos = 0;
+                                resample_pos = 0.0;
+                            }
+                        }
+                    }
+
+                    if let Some(ref buf) = current_buffer {
+                        if needs_resample {
+                            // Linear interpolation resampling
+                            let frames = buf.len() / input_channels as usize;
+                            let frame_idx = resample_pos as usize;
+
+                            if frame_idx < frames {
+                                // Which output channel are we filling?
+                                // cpal interleaves channels: [L, R, L, R, ...]
+                                // We track which channel via buffer_pos % device_channels
+                                let out_ch = buffer_pos % device_channels as usize;
+                                let in_ch = if out_ch < input_channels as usize {
+                                    out_ch
+                                } else {
+                                    0 // downmix: repeat first channel
+                                };
+
+                                let idx0 = frame_idx * input_channels as usize + in_ch;
+                                let s0 = buf[idx0].to_f32();
+
+                                let s1 = if frame_idx + 1 < frames {
+                                    let idx1 = (frame_idx + 1) * input_channels as usize + in_ch;
+                                    buf[idx1].to_f32()
+                                } else {
+                                    s0
+                                };
+
+                                let frac = resample_pos - frame_idx as f64;
+                                *sample_out = s0 + (s1 - s0) * frac as f32;
+
+                                buffer_pos += 1;
+                                // Advance fractional position once per frame (after all channels)
+                                if buffer_pos.is_multiple_of(device_channels as usize) {
+                                    resample_pos += ratio;
+                                }
+                            } else {
+                                *sample_out = 0.0;
+                                buffer_pos += 1;
+                            }
+                        } else {
+                            // No resampling needed - direct copy
+                            if buffer_pos < buf.len() {
+                                *sample_out = buf[buffer_pos].to_f32();
+                                buffer_pos += 1;
+                            } else {
+                                *sample_out = 0.0;
+                            }
+                        }
+                    } else {
+                        *sample_out = 0.0;
+                    }
+                }
+            },
+            |err| {
+                warn!("Audio stream error: {}", err);
+            },
+            None,
+        )?;
+
+        stream.play()?;
+
+        Ok(NativeAudioOutput {
+            sample_tx,
+            _stream: stream,
+            _latency_micros: latency_micros,
+        })
+    }
+
+    fn write(&mut self, samples: &Arc<[Sample]>) -> Result<(), Box<dyn std::error::Error>> {
+        self.sample_tx
+            .send(Arc::clone(samples))
+            .map_err(|_| "Failed to send samples to audio thread")?;
+        Ok(())
+    }
+}
+
 /// Audio Player
 pub struct Player {
     audio_queue: Arc<Mutex<VecDeque<AudioBuffer>>>,
+    queue_condvar: Arc<Condvar>,
     control_tx: mpsc::Sender<PlaybackControl>,
 }
 
 impl Player {
     /// Create a new player and spawn the playback thread
-    pub fn new(initial_volume: u8) -> Self {
+    pub fn new(initial_volume: u8, audio_buffer_frames: u32) -> Self {
         let audio_queue: Arc<Mutex<VecDeque<AudioBuffer>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let queue_condvar = Arc::new(Condvar::new());
         let queue_clone = Arc::clone(&audio_queue);
+        let condvar_clone = Arc::clone(&queue_condvar);
 
         let (control_tx, control_rx) = mpsc::channel::<PlaybackControl>();
 
         // Spawn playback thread
         std::thread::spawn(move || {
-            if let Err(e) = Self::playback_thread(queue_clone, control_rx, initial_volume) {
+            if let Err(e) = Self::playback_thread(
+                queue_clone,
+                condvar_clone,
+                control_rx,
+                initial_volume,
+                audio_buffer_frames,
+            ) {
                 error!("Playback thread error: {}", e);
             }
         });
 
         Player {
             audio_queue,
+            queue_condvar,
             control_tx,
         }
     }
@@ -50,16 +250,19 @@ impl Player {
     /// Add an audio buffer to the playback queue
     pub fn enqueue(&self, buffer: AudioBuffer) {
         self.audio_queue.lock().unwrap().push_back(buffer);
+        self.queue_condvar.notify_one();
     }
 
     /// Stop playback and clear the queue
     pub fn stop(&self) {
         let _ = self.control_tx.send(PlaybackControl::Stop);
+        self.queue_condvar.notify_one();
     }
 
     /// Resume playback
     pub fn resume(&self) {
         let _ = self.control_tx.send(PlaybackControl::Resume);
+        self.queue_condvar.notify_one();
     }
 
     /// Set volume (0-100)
@@ -70,10 +273,12 @@ impl Player {
     /// Playback thread - handles audio output
     fn playback_thread(
         queue: Arc<Mutex<VecDeque<AudioBuffer>>>,
+        condvar: Arc<Condvar>,
         control_rx: mpsc::Receiver<PlaybackControl>,
         initial_volume: u8,
+        audio_buffer_frames: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut output: Option<CpalOutput> = None;
+        let mut output: Option<NativeAudioOutput> = None;
         let mut stopped = true; // Start stopped
         let mut current_volume: u8 = initial_volume;
 
@@ -99,14 +304,26 @@ impl Player {
                 }
             }
 
-            // If stopped, don't play anything
+            // If stopped, wait on condvar until woken (by resume/stop/enqueue)
             if stopped {
-                std::thread::sleep(Duration::from_millis(10));
+                let guard = queue.lock().unwrap();
+                let _ = condvar
+                    .wait_timeout(guard, Duration::from_millis(100))
+                    .unwrap();
                 continue;
             }
 
-            // Get next buffer
-            let buffer = queue.lock().unwrap().pop_front();
+            // Get next buffer, or wait on condvar if queue is empty
+            let buffer = {
+                let mut guard = queue.lock().unwrap();
+                if guard.is_empty() {
+                    let (guard_after, _) = condvar
+                        .wait_timeout(guard, Duration::from_millis(10))
+                        .unwrap();
+                    guard = guard_after;
+                }
+                guard.pop_front()
+            };
 
             if let Some(buffer) = buffer {
                 // Time-sync: wait until play_at time
@@ -125,14 +342,14 @@ impl Player {
 
                 // Initialize output if needed
                 if output.is_none() {
-                    match CpalOutput::new(buffer.format.clone()) {
+                    match NativeAudioOutput::new(buffer.format.clone(), audio_buffer_frames) {
                         Ok(out) => {
                             info!("Audio output initialized with volume {}", current_volume);
                             output = Some(out);
                         }
                         Err(e) => {
                             error!("Failed to create output: {}", e);
-                            return Err(e.into());
+                            return Err(e);
                         }
                     }
                 }
@@ -156,9 +373,6 @@ impl Player {
                         error!("Output error: {}", e);
                     }
                 }
-            } else {
-                // Queue empty
-                std::thread::sleep(Duration::from_micros(500));
             }
         }
     }
@@ -172,13 +386,13 @@ mod tests {
 
     #[test]
     fn test_player_creation() {
-        let player = Player::new(75);
+        let player = Player::new(75, 0);
         assert!(player.control_tx.send(PlaybackControl::Stop).is_ok());
     }
 
     #[test]
     fn test_enqueue_buffer() {
-        let player = Player::new(50);
+        let player = Player::new(50, 0);
 
         let format = AudioFormat {
             codec: Codec::Pcm,
@@ -205,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_stop_clears_queue() {
-        let player = Player::new(50);
+        let player = Player::new(50, 0);
 
         let format = AudioFormat {
             codec: Codec::Pcm,
@@ -239,7 +453,7 @@ mod tests {
 
     #[test]
     fn test_control_commands() {
-        let player = Player::new(50);
+        let player = Player::new(50, 0);
 
         // Test all control commands send successfully
         assert!(player.control_tx.send(PlaybackControl::Stop).is_ok());
@@ -252,7 +466,7 @@ mod tests {
 
     #[test]
     fn test_volume_control() {
-        let player = Player::new(50);
+        let player = Player::new(50, 0);
 
         // Test volume bounds
         player.set_volume(0);

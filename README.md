@@ -70,13 +70,14 @@ sendspin-rs-cli --name "Living Room" --volume 50
 
 ```
 Options:
-  -s, --server <SERVER>        Server address (host:port). If not specified, uses mDNS discovery
-  -n, --name <NAME>            Player name [default: "Sendspin-RS Player"]
-      --client-id <CLIENT_ID>  Custom client ID (auto-generated if not specified)
-  -v, --volume <VOLUME>        Initial volume (0-100) [default: 30]
-  -b, --buffer <BUFFER>        Buffer size in milliseconds [default: 20]
-  -h, --help                   Print help
-      --version                Print version
+  -s, --server <SERVER>              Server address (host:port). If not specified, uses mDNS discovery
+  -n, --name <NAME>                  Player name [default: "Sendspin-RS Player"]
+      --client-id <CLIENT_ID>        Custom client ID (auto-generated if not specified)
+  -v, --volume <VOLUME>              Initial volume (0-100) [default: 30]
+  -b, --buffer <BUFFER>              Buffer size in milliseconds [default: 20]
+      --audio-buffer <AUDIO_BUFFER>  Audio device buffer size in frames (0 = system default) [default: 0]
+  -h, --help                         Print help
+      --version                      Print version
 ```
 
 ### Examples
@@ -213,6 +214,20 @@ If mDNS discovery fails, manually specify the server address:
 ```bash
 sendspin-rs-cli --server <server-ip>:8927
 ```
+
+### Audio stuttering on Asahi Linux (Apple Silicon)
+
+Asahi Linux audio devices typically report a native format of F32 at 44100Hz. The
+system default ALSA buffer size can be too small, causing `Buffer underrun/overrun`
+errors and audible stuttering. Use the `--audio-buffer` flag to increase the buffer:
+
+```bash
+sendspin-rs-cli --audio-buffer 4096
+```
+
+A value of 4096 frames (~93ms at 44100Hz) works well. If you still hear stuttering,
+try 8192. The player automatically resamples to the device's native sample rate, so
+no additional configuration is needed.
 
 ### Audio device errors (Linux)
 
