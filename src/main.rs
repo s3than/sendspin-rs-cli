@@ -7,7 +7,7 @@
 // 4. Skip → Stop old + Start new (clean transition)
 // 5. All output is time-synced to play_at timestamps
 
-mod compat;
+mod audio;
 mod mdns;
 mod player;
 
@@ -16,13 +16,14 @@ use log::{debug, error, info, warn};
 use player::Player;
 use sendspin::audio::decode::{Decoder, PcmDecoder, PcmEndian};
 use sendspin::audio::{AudioBuffer, AudioFormat, Codec};
+use sendspin::protocol::client::{ProtocolClient, WsSender};
 use sendspin::protocol::messages::{
-    AudioFormatSpec, ClientHello, ClientState, ClientTime, DeviceInfo, GroupUpdate, Message,
-    PlayerState, PlayerSyncState, PlayerV1Support, ServerState,
+    AudioFormatSpec, ClientHello, ClientState, DeviceInfo, GroupUpdate, Message, PlayerState,
+    PlayerSyncState, PlayerV1Support, ServerState,
 };
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-async fn send_player_state(ws_tx: &compat::CompatWsSender, volume: u8, muted: bool) {
+async fn send_player_state(ws_tx: &WsSender, volume: u8, muted: bool) {
     let state = Message::ClientState(ClientState {
         player: Some(PlayerState {
             state: PlayerSyncState::Synchronized,
@@ -145,9 +146,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         // Connect to server
-        let (mut message_rx, mut audio_rx, clock_sync, ws_tx) =
-            match compat::connect_with_compat(&ws_url, hello).await {
-                Ok(conn) => conn,
+        let (mut message_rx, mut audio_rx, clock_sync, ws_tx, _guard) =
+            match ProtocolClient::connect(&ws_url, hello).await {
+                Ok(client) => client.split(),
                 Err(e) => {
                     warn!(
                         "Connection failed: {}. Retrying in {}s...",
@@ -167,19 +168,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Send initial state
         send_player_state(&ws_tx, args.volume, false).await;
         info!("Sent initial client/state");
-
-        // Send initial time sync
-        let client_transmitted = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
-        if let Err(e) = ws_tx
-            .send_message(Message::ClientTime(ClientTime { client_transmitted }))
-            .await
-        {
-            warn!("Failed to send time sync: {}. Reconnecting...", e);
-            continue;
-        }
 
         info!("Waiting for stream to start...");
 
@@ -278,18 +266,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        Message::ServerTime(server_time) => {
-                            let t4 = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_micros() as i64;
-                            clock_sync.lock().await.update(
-                                server_time.client_transmitted,
-                                server_time.server_received,
-                                server_time.server_transmitted,
-                                t4
-                            );
-                        }
                         Message::ServerState(ServerState { metadata, controller }) => {
                             if let Some(meta) = metadata {
                                 let title = meta.title.as_deref().unwrap_or("Unknown");
@@ -332,7 +308,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 (frames as u64 * 1_000_000) / fmt.sample_rate as u64
                             );
 
-                            let sync = clock_sync.lock().await;
+                            let sync = clock_sync.lock();
                             let play_at = if let Some(instant) = sync.server_to_local_instant(chunk.timestamp) {
                                 instant
                             } else {
