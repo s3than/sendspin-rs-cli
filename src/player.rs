@@ -166,7 +166,7 @@ impl NativeAudioOutput {
 
                                 buffer_pos += 1;
                                 // Advance fractional position once per frame (after all channels)
-                                if buffer_pos % device_channels as usize == 0 {
+                                if buffer_pos.is_multiple_of(device_channels as usize) {
                                     resample_pos += ratio;
                                 }
                             } else {
