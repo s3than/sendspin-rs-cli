@@ -8,6 +8,7 @@
 // 5. All output is time-synced to play_at timestamps
 
 pub mod audio;
+pub mod error;
 pub mod mdns;
 pub mod player;
 
@@ -22,6 +23,8 @@ use sendspin::protocol::messages::{
     PlayerSyncState, PlayerV1Support, ServerState,
 };
 use std::time::{Duration, Instant};
+
+use crate::error::SendspinError;
 
 async fn send_player_state(ws_tx: &WsSender, volume: u8, muted: bool) {
     let state = Message::ClientState(ClientState {
@@ -45,7 +48,7 @@ struct Args {
     name: String,
     #[arg(long)]
     client_id: Option<String>,
-    #[arg(short, long, default_value = "30")]
+    #[arg(short, long, default_value = "30", value_parser = clap::value_parser!(u8).range(0..=100))]
     volume: u8,
     #[arg(short, long, default_value = "20")]
     buffer: u64,
@@ -54,7 +57,7 @@ struct Args {
     audio_buffer: u32,
 }
 
-pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run() -> Result<(), SendspinError> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
 

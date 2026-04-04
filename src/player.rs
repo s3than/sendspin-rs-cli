@@ -8,6 +8,7 @@
 // - Native device format output (avoids ALSA resampling)
 
 use crate::audio::NativeAudioOutput;
+use crate::error::SendspinError;
 use log::{error, info};
 use sendspin::audio::{AudioBuffer, Sample};
 use std::collections::VecDeque;
@@ -89,7 +90,7 @@ impl Player {
         control_rx: mpsc::Receiver<PlaybackControl>,
         initial_volume: u8,
         audio_buffer_frames: u32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), SendspinError> {
         let mut output: Option<NativeAudioOutput> = None;
         let mut stopped = true; // Start stopped
         let mut current_volume: u8 = initial_volume;

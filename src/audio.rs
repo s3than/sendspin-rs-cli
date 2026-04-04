@@ -10,6 +10,8 @@ use sendspin::audio::{AudioFormat, Sample};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
+use crate::error::SendspinError;
+
 /// Audio output that uses the device's native format to avoid ALSA resampling.
 ///
 /// On Asahi Linux the device reports F32 44100Hz, but incoming audio may be
@@ -22,14 +24,11 @@ pub struct NativeAudioOutput {
 }
 
 impl NativeAudioOutput {
-    pub fn new(
-        input_format: AudioFormat,
-        audio_buffer_frames: u32,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(input_format: AudioFormat, audio_buffer_frames: u32) -> Result<Self, SendspinError> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
-            .ok_or("No output device available")?;
+            .ok_or(SendspinError::NoOutputDevice)?;
 
         let default_config = device.default_output_config()?;
         let device_sample_rate = default_config.sample_rate();
@@ -188,10 +187,10 @@ impl NativeAudioOutput {
         })
     }
 
-    pub fn write(&mut self, samples: &Arc<[Sample]>) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn write(&mut self, samples: &Arc<[Sample]>) -> Result<(), SendspinError> {
         self.sample_tx
             .send(Arc::clone(samples))
-            .map_err(|_| "Failed to send samples to audio thread")?;
+            .map_err(|_| SendspinError::Audio("Failed to send samples to audio thread".into()))?;
         Ok(())
     }
 }

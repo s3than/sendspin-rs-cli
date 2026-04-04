@@ -1,4 +1,6 @@
+use sendspin_rs_cli::error::SendspinError;
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), SendspinError> {
     sendspin_rs_cli::run().await
 }
