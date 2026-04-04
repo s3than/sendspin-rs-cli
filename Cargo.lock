@@ -1065,6 +1065,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "cpal",
  "env_logger",
  "futures-util",
  "log",

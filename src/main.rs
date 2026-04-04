@@ -37,6 +37,9 @@ struct Args {
     volume: u8,
     #[arg(short, long, default_value = "20")]
     buffer: u64,
+    /// Audio device buffer size in frames (0 = system default, try 4096 on Asahi Linux)
+    #[arg(long, default_value = "0")]
+    audio_buffer: u32,
 }
 
 #[tokio::main]
@@ -98,6 +101,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     sample_rate: 48000,
                     bit_depth: 16,
                 },
+                AudioFormatSpec {
+                    codec: "pcm".to_string(),
+                    channels: 2,
+                    sample_rate: 44100,
+                    bit_depth: 24,
+                },
+                AudioFormatSpec {
+                    codec: "pcm".to_string(),
+                    channels: 2,
+                    sample_rate: 44100,
+                    bit_depth: 16,
+                },
             ],
             buffer_capacity: 1048576,
             supported_commands: vec!["volume".to_string(), "mute".to_string()],
@@ -138,7 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Waiting for stream to start...");
 
     // Create player with initial volume
-    let player = Player::new(args.volume);
+    let player = Player::new(args.volume, args.audio_buffer);
 
     // Message handling
     let mut decoder: Option<PcmDecoder> = None;
