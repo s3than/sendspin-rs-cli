@@ -49,30 +49,7 @@ pub async fn connect_with_compat(
 
     // Serialize the ClientHello normally
     let hello_msg = Message::ClientHello(hello);
-    let mut hello_json = serde_json::to_value(&hello_msg)?;
-
-    // Fix field names for Music Assistant compatibility
-    if let Some(payload) = hello_json.get_mut("payload") {
-        let payload_obj = payload.as_object_mut().unwrap();
-
-        // Rename player@v1_support to player_support
-        if let Some(player_v1_support) = payload_obj.get("player@v1_support").cloned() {
-            payload_obj.insert("player_support".to_string(), player_v1_support);
-            payload_obj.remove("player@v1_support");
-        }
-
-        // Rename artwork@v1_support to artwork_support if present
-        if let Some(artwork_v1_support) = payload_obj.get("artwork@v1_support").cloned() {
-            payload_obj.insert("artwork_support".to_string(), artwork_v1_support);
-            payload_obj.remove("artwork@v1_support");
-        }
-
-        // Rename visualizer@v1_support to visualizer_support if present
-        if let Some(visualizer_v1_support) = payload_obj.get("visualizer@v1_support").cloned() {
-            payload_obj.insert("visualizer_support".to_string(), visualizer_v1_support);
-            payload_obj.remove("visualizer@v1_support");
-        }
-    }
+    let hello_json = serde_json::to_value(&hello_msg)?;
 
     let hello_string = serde_json::to_string(&hello_json)?;
     debug!("Sending compatibility hello: {}", hello_string);
