@@ -124,15 +124,13 @@ impl NativeAudioOutput {
                         None => true,
                     };
 
-                    if need_new {
-                        if let Ok(rx) = sample_rx.lock() {
-                            if let Ok(buf) = rx.try_recv() {
+                    if need_new
+                        && let Ok(rx) = sample_rx.lock()
+                            && let Ok(buf) = rx.try_recv() {
                                 current_buffer = Some(buf);
                                 buffer_pos = 0;
                                 resample_pos = 0.0;
                             }
-                        }
-                    }
 
                     if let Some(ref buf) = current_buffer {
                         if needs_resample {
@@ -368,11 +366,10 @@ impl Player {
                 };
 
                 // Write audio
-                if let Some(ref mut out) = output {
-                    if let Err(e) = out.write(&samples) {
+                if let Some(ref mut out) = output
+                    && let Err(e) = out.write(&samples) {
                         error!("Output error: {}", e);
                     }
-                }
             }
         }
     }
