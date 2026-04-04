@@ -319,15 +319,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 Some(chunk) = audio_rx.recv() => {
-                    if let Some(ref fmt) = audio_format {
-                        if endian_locked.is_none() {
+                    if let Some(ref fmt) = audio_format
+                        && endian_locked.is_none() {
                             endian_locked = Some(PcmEndian::Little);
                             decoder = Some(PcmDecoder::with_endian(fmt.bit_depth, PcmEndian::Little));
                         }
-                    }
 
-                    if let (Some(dec), Some(fmt)) = (&decoder, &audio_format) {
-                        if let Ok(samples) = dec.decode(&chunk.data) {
+                    if let (Some(dec), Some(fmt)) = (&decoder, &audio_format)
+                        && let Ok(samples) = dec.decode(&chunk.data) {
                             let frames = samples.len() / fmt.channels as usize;
                             let duration = Duration::from_micros(
                                 (frames as u64 * 1_000_000) / fmt.sample_rate as u64
@@ -355,7 +354,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             player.enqueue(buffer);
                         }
-                    }
                 }
 
                 else => break,
