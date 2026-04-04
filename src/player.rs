@@ -12,7 +12,7 @@ use log::{error, info, warn};
 use sendspin::audio::{AudioBuffer, AudioFormat, Sample};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 /// Player control commands
@@ -458,10 +458,12 @@ mod tests {
         // Test all control commands send successfully
         assert!(player.control_tx.send(PlaybackControl::Stop).is_ok());
         assert!(player.control_tx.send(PlaybackControl::Resume).is_ok());
-        assert!(player
-            .control_tx
-            .send(PlaybackControl::SetVolume(80))
-            .is_ok());
+        assert!(
+            player
+                .control_tx
+                .send(PlaybackControl::SetVolume(80))
+                .is_ok()
+        );
     }
 
     #[test]
