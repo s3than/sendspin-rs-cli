@@ -4,9 +4,11 @@ use log::{debug, info};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use std::time::Duration;
 
+use crate::error::SendspinError;
+
 /// Discover Sendspin server via mDNS
 /// Returns server address in format "host:port"
-pub fn discover_sendspin_server() -> Result<String, Box<dyn std::error::Error>> {
+pub fn discover_sendspin_server() -> Result<String, SendspinError> {
     info!("Starting mDNS discovery for Sendspin server...");
 
     // Create mDNS daemon
@@ -24,7 +26,9 @@ pub fn discover_sendspin_server() -> Result<String, Box<dyn std::error::Error>> 
 
     let result = loop {
         if start.elapsed() >= timeout {
-            break Err("No Sendspin server found via mDNS after 5 seconds".into());
+            break Err(SendspinError::Discovery(
+                "No Sendspin server found via mDNS after 5 seconds".into(),
+            ));
         }
 
         if let Ok(event) = receiver.recv_timeout(Duration::from_millis(100)) {
