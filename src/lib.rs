@@ -287,41 +287,40 @@ fn handle_audio_chunk(
     clock_sync: &Arc<parking_lot::Mutex<ClockSync>>,
     buffer_ms: u64,
 ) {
-    if let Some(ref fmt) = stream.audio_format {
-        if stream.endian_locked.is_none() {
-            stream.endian_locked = Some(PcmEndian::Little);
-            stream.decoder = Some(PcmDecoder::with_endian(fmt.bit_depth, PcmEndian::Little));
-        }
+    if let Some(ref fmt) = stream.audio_format
+        && stream.endian_locked.is_none()
+    {
+        stream.endian_locked = Some(PcmEndian::Little);
+        stream.decoder = Some(PcmDecoder::with_endian(fmt.bit_depth, PcmEndian::Little));
     }
 
-    if let (Some(dec), Some(fmt)) = (&stream.decoder, &stream.audio_format) {
-        if let Ok(samples) = dec.decode(&chunk.data) {
-            let frames = samples.len() / fmt.channels as usize;
-            let duration =
-                Duration::from_micros((frames as u64 * 1_000_000) / fmt.sample_rate as u64);
+    if let (Some(dec), Some(fmt)) = (&stream.decoder, &stream.audio_format)
+        && let Ok(samples) = dec.decode(&chunk.data)
+    {
+        let frames = samples.len() / fmt.channels as usize;
+        let duration = Duration::from_micros((frames as u64 * 1_000_000) / fmt.sample_rate as u64);
 
-            let sync = clock_sync.lock();
-            let play_at = if let Some(instant) = sync.server_to_local_instant(chunk.timestamp) {
-                instant
-            } else {
-                if stream.next_play_time.is_none() {
-                    stream.next_play_time = Some(Instant::now() + Duration::from_millis(buffer_ms));
-                }
-                let pt = stream.next_play_time.unwrap();
-                stream.next_play_time = Some(pt + duration);
-                pt
-            };
-            drop(sync);
+        let sync = clock_sync.lock();
+        let play_at = if let Some(instant) = sync.server_to_local_instant(chunk.timestamp) {
+            instant
+        } else {
+            if stream.next_play_time.is_none() {
+                stream.next_play_time = Some(Instant::now() + Duration::from_millis(buffer_ms));
+            }
+            let pt = stream.next_play_time.unwrap();
+            stream.next_play_time = Some(pt + duration);
+            pt
+        };
+        drop(sync);
 
-            let buffer = AudioBuffer {
-                timestamp: chunk.timestamp,
-                play_at,
-                samples,
-                format: fmt.clone(),
-            };
+        let buffer = AudioBuffer {
+            timestamp: chunk.timestamp,
+            play_at,
+            samples,
+            format: fmt.clone(),
+        };
 
-            player.enqueue(buffer);
-        }
+        player.enqueue(buffer);
     }
 }
 
