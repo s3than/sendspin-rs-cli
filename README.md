@@ -73,7 +73,8 @@ Options:
   -s, --server <SERVER>              Server address (host:port). If not specified, uses mDNS discovery
   -n, --name <NAME>                  Player name [default: "Sendspin-RS Player"]
       --client-id <CLIENT_ID>        Custom client ID (auto-generated if not specified)
-  -v, --volume <VOLUME>              Initial volume (0-100) [default: 30]
+  -v, --volume <VOLUME>              Initial volume 0-100 (overrides saved config; default: 30 if no saved value)
+      --reset-volume                 Ignore saved volume and use default (30) or the value from --volume
   -b, --buffer <BUFFER>              Buffer size in milliseconds [default: 20]
       --audio-buffer <AUDIO_BUFFER>  Audio device buffer size in frames (0 = system default) [default: 0]
   -h, --help                         Print help
@@ -103,6 +104,32 @@ sendspin-rs-cli \
 **Enable debug logging:**
 ```bash
 RUST_LOG=debug sendspin-rs-cli
+```
+
+## Configuration
+
+The player saves persistent settings to a TOML config file in the platform-specific config directory:
+
+| Platform | Path |
+|----------|------|
+| Linux | `~/.config/sendspin-rs-cli/config.toml` |
+| macOS | `~/Library/Application Support/sendspin-rs-cli/config.toml` |
+| Windows | `C:\Users\<User>\AppData\Roaming\sendspin-rs-cli\config.toml` |
+
+### Volume Persistence
+
+When the server adjusts the volume (e.g. from the Music Assistant UI), the new value is automatically saved to the config file. On next startup, the saved volume is restored unless overridden:
+
+- **No args**: uses saved volume, or 30 if no config exists
+- **`--volume 50`**: uses 50, ignoring saved value
+- **`--reset-volume`**: ignores saved value, uses default 30
+- **`--reset-volume --volume 75`**: ignores saved value, uses 75
+
+Example config file:
+
+```toml
+[player]
+volume = 65
 ```
 
 ## How It Works
@@ -191,11 +218,13 @@ cross build --release --target x86_64-pc-windows-gnu
 ```
 sendspin-rs-cli/
 ├── src/
-│   ├── main.rs      # Entry point and protocol handling
-│   ├── player.rs    # Audio playback and queue management
-│   ├── mdns.rs      # mDNS server discovery
-│   ├── compat.rs    # Protocol compatibility shim
-│   └── lib.rs       # Library exports for testing
+│   ├── main.rs      # Thin entry point
+│   ├── lib.rs       # Crate root: connection loop, protocol handling
+│   ├── player.rs    # Audio playback, queue management, volume control
+│   ├── audio.rs     # Native audio output (cpal, resampling)
+│   ├── config.rs    # XDG config persistence (TOML)
+│   ├── error.rs     # SendspinError enum
+│   └── mdns.rs      # mDNS server discovery
 ├── tests/
 │   └── integration_test.rs  # Integration tests
 ├── Cross.toml       # Cross-compilation configuration

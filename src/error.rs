@@ -17,6 +17,9 @@ pub enum SendspinError {
     #[error("no output device available")]
     NoOutputDevice,
 
+    #[error("config error: {0}")]
+    Config(String),
+
     #[error(transparent)]
     Cpal(#[from] cpal::BuildStreamError),
 

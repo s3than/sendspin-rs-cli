@@ -8,6 +8,7 @@
 // 5. All output is time-synced to play_at timestamps
 
 pub mod audio;
+pub mod config;
 pub mod error;
 pub mod mdns;
 pub mod player;
@@ -48,8 +49,11 @@ struct Args {
     name: String,
     #[arg(long)]
     client_id: Option<String>,
-    #[arg(short, long, default_value = "30", value_parser = clap::value_parser!(u8).range(0..=100))]
-    volume: u8,
+    #[arg(short, long, value_parser = clap::value_parser!(u8).range(0..=100))]
+    volume: Option<u8>,
+    /// Ignore saved volume and use default (30) or the value from --volume
+    #[arg(long)]
+    reset_volume: bool,
     #[arg(short, long, default_value = "20")]
     buffer: u64,
     /// Audio device buffer size in frames (0 = system default, try 4096 on Asahi Linux)
@@ -68,8 +72,17 @@ pub async fn run() -> Result<(), SendspinError> {
 
     info!("Client ID: {}", client_id);
 
-    // Create player with initial volume (persists across reconnects)
-    let player = Player::new(args.volume, args.audio_buffer);
+    // Resolve effective volume: CLI arg > saved config > default 30
+    let saved_config = config::AppConfig::load();
+    let effective_volume = if args.reset_volume {
+        args.volume.unwrap_or(30)
+    } else {
+        args.volume.or(saved_config.player.volume).unwrap_or(30)
+    };
+    info!("Initial volume: {}", effective_volume);
+
+    // Create player with resolved volume (persists across reconnects)
+    let player = Player::new(effective_volume, args.audio_buffer);
     let buffer_ms = args.buffer;
 
     let mut reconnect_delay = Duration::from_secs(2);
@@ -168,7 +181,7 @@ pub async fn run() -> Result<(), SendspinError> {
         info!("Connected!");
 
         // Send initial state
-        send_player_state(&ws_tx, args.volume, false).await;
+        send_player_state(&ws_tx, player.volume(), false).await;
         info!("Sent initial client/state");
 
         info!("Waiting for stream to start...");
@@ -182,6 +195,14 @@ pub async fn run() -> Result<(), SendspinError> {
         // Message handling loop
         loop {
             tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received Ctrl+C, shutting down...");
+                    player.stop();
+                    let vol = player.volume();
+                    config::save_volume(vol);
+                    info!("Saved volume {} to config", vol);
+                    std::process::exit(0);
+                }
                 Some(msg) = message_rx.recv() => {
                     match &msg {
                         Message::StreamStart(_) => info!("← SERVER: stream/start"),
@@ -223,7 +244,7 @@ pub async fn run() -> Result<(), SendspinError> {
                                 next_play_time = None;
 
                                 info!("Stream: {}Hz {}ch {}bit", sample_rate, channels, bit_depth);
-                                send_player_state(&ws_tx, args.volume, false).await;
+                                send_player_state(&ws_tx, player.volume(), false).await;
                             }
                         }
                         Message::StreamEnd(_end_data) => {
@@ -232,7 +253,7 @@ pub async fn run() -> Result<(), SendspinError> {
                             player.stop();
                             next_play_time = None;
 
-                            send_player_state(&ws_tx, args.volume, false).await;
+                            send_player_state(&ws_tx, player.volume(), false).await;
                         }
                         Message::StreamClear(_) => {
                             player.stop();
@@ -241,7 +262,7 @@ pub async fn run() -> Result<(), SendspinError> {
                             endian_locked = None;
                             next_play_time = None;
 
-                            send_player_state(&ws_tx, args.volume, false).await;
+                            send_player_state(&ws_tx, player.volume(), false).await;
                         }
                         Message::ServerCommand(command) => {
                             if let Some(player_cmd) = &command.player {
@@ -249,17 +270,20 @@ pub async fn run() -> Result<(), SendspinError> {
                                     "pause" | "stop" => {
                                         info!("→ Handling pause/stop command");
                                         player.stop();
-                                        send_player_state(&ws_tx, args.volume, false).await;
+                                        send_player_state(&ws_tx, player.volume(), false).await;
                                     }
                                     "play" => {
                                         info!("→ Handling play command");
                                         player.resume();
-                                        send_player_state(&ws_tx, args.volume, false).await;
+                                        send_player_state(&ws_tx, player.volume(), false).await;
                                     }
                                     "volume" => {
                                         if let Some(vol) = player_cmd.volume {
                                             info!("← Setting volume to {}", vol);
                                             player.set_volume(vol);
+                                            tokio::task::spawn_blocking(move || {
+                                                config::save_volume(vol);
+                                            });
                                         }
                                     }
                                     _ => {
