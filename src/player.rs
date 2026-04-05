@@ -12,6 +12,7 @@ use crate::error::SendspinError;
 use log::{error, info};
 use sendspin::audio::{AudioBuffer, Sample};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
@@ -28,6 +29,7 @@ pub struct Player {
     audio_queue: Arc<Mutex<VecDeque<AudioBuffer>>>,
     queue_condvar: Arc<Condvar>,
     control_tx: mpsc::Sender<PlaybackControl>,
+    current_volume: Arc<AtomicU8>,
 }
 
 impl Player {
@@ -35,8 +37,10 @@ impl Player {
     pub fn new(initial_volume: u8, audio_buffer_frames: u32) -> Self {
         let audio_queue: Arc<Mutex<VecDeque<AudioBuffer>>> = Arc::new(Mutex::new(VecDeque::new()));
         let queue_condvar = Arc::new(Condvar::new());
+        let current_volume = Arc::new(AtomicU8::new(initial_volume));
         let queue_clone = Arc::clone(&audio_queue);
         let condvar_clone = Arc::clone(&queue_condvar);
+        let volume_clone = Arc::clone(&current_volume);
 
         let (control_tx, control_rx) = mpsc::channel::<PlaybackControl>();
 
@@ -46,7 +50,7 @@ impl Player {
                 queue_clone,
                 condvar_clone,
                 control_rx,
-                initial_volume,
+                volume_clone,
                 audio_buffer_frames,
             ) {
                 error!("Playback thread error: {}", e);
@@ -57,6 +61,7 @@ impl Player {
             audio_queue,
             queue_condvar,
             control_tx,
+            current_volume,
         }
     }
 
@@ -80,7 +85,13 @@ impl Player {
 
     /// Set volume (0-100)
     pub fn set_volume(&self, volume: u8) {
+        self.current_volume.store(volume, Ordering::Relaxed);
         let _ = self.control_tx.send(PlaybackControl::SetVolume(volume));
+    }
+
+    /// Get current volume (0-100)
+    pub fn volume(&self) -> u8 {
+        self.current_volume.load(Ordering::Relaxed)
     }
 
     /// Playback thread - handles audio output
@@ -88,12 +99,11 @@ impl Player {
         queue: Arc<Mutex<VecDeque<AudioBuffer>>>,
         condvar: Arc<Condvar>,
         control_rx: mpsc::Receiver<PlaybackControl>,
-        initial_volume: u8,
+        volume: Arc<AtomicU8>,
         audio_buffer_frames: u32,
     ) -> Result<(), SendspinError> {
         let mut output: Option<NativeAudioOutput> = None;
         let mut stopped = true; // Start stopped
-        let mut current_volume: u8 = initial_volume;
 
         loop {
             // Check for control commands
@@ -112,7 +122,7 @@ impl Player {
                     }
                     PlaybackControl::SetVolume(vol) => {
                         info!("→ Playback: SET VOLUME {}", vol);
-                        current_volume = vol;
+                        volume.store(vol, Ordering::Relaxed);
                     }
                 }
             }
@@ -157,7 +167,10 @@ impl Player {
                 if output.is_none() {
                     match NativeAudioOutput::new(buffer.format.clone(), audio_buffer_frames) {
                         Ok(out) => {
-                            info!("Audio output initialized with volume {}", current_volume);
+                            info!(
+                                "Audio output initialized with volume {}",
+                                volume.load(Ordering::Relaxed)
+                            );
                             output = Some(out);
                         }
                         Err(e) => {
@@ -168,6 +181,7 @@ impl Player {
                 }
 
                 // Apply volume scaling to samples
+                let current_volume = volume.load(Ordering::Relaxed);
                 let samples: Arc<[Sample]> = if current_volume < 100 {
                     let volume_factor = current_volume as f32 / 100.0;
                     let scaled_samples: Vec<_> = buffer
