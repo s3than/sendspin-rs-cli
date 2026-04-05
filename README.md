@@ -71,8 +71,8 @@ sendspin-rs-cli --name "Living Room" --volume 50
 ```
 Options:
   -s, --server <SERVER>              Server address (host:port). If not specified, uses mDNS discovery
-  -n, --name <NAME>                  Player name [default: "Sendspin-RS Player"]
-      --client-id <CLIENT_ID>        Custom client ID (auto-generated if not specified)
+  -n, --name <NAME>                  Player name (saved to config; defaults to hostname)
+      --client-id <CLIENT_ID>        Client ID (saved to config; pass "" to regenerate)
   -v, --volume <VOLUME>              Initial volume 0-100 (overrides saved config; default: 30 if no saved value)
       --reset-volume                 Ignore saved volume and use default (30) or the value from --volume
   -b, --buffer <BUFFER>              Buffer size in milliseconds [default: 20]
@@ -125,9 +125,27 @@ When the server adjusts the volume (e.g. from the Music Assistant UI), the new v
 - **`--reset-volume`**: ignores saved value, uses default 30
 - **`--reset-volume --volume 75`**: ignores saved value, uses 75
 
+### Player Name Persistence
+
+The player name is shown in the Music Assistant UI. On first run it defaults to the system hostname and is saved to config.
+
+- **No args**: uses saved name, or defaults to hostname if none exists
+- **`--name "Living Room"`**: uses `Living Room` and saves it to config
+
+### Client ID Persistence
+
+A stable client ID ensures the Music Assistant server recognises this player across restarts. On first run a UUID-based ID is generated and saved to the config file automatically.
+
+- **No args**: uses saved client ID, or generates and saves a new one if none exists
+- **`--client-id my-player`**: uses `my-player` and saves it to config
+- **`--client-id ""`**: generates a new ID and saves it
+
 Example config file:
 
 ```toml
+client_id = "sendspin-rs-a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+name = "hostname"
+
 [player]
 volume = 65
 ```
