@@ -5,6 +5,10 @@ use std::path::PathBuf;
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
     pub player: PlayerConfig,
 }
 
@@ -64,5 +68,23 @@ pub fn save_volume(vol: u8) {
     config.player.volume = Some(vol);
     if let Err(e) = config.save() {
         warn!("Failed to save volume to config: {}", e);
+    }
+}
+
+/// Save name to config file
+pub fn save_name(name: &str) {
+    let mut config = AppConfig::load();
+    config.name = Some(name.to_string());
+    if let Err(e) = config.save() {
+        warn!("Failed to save name to config: {}", e);
+    }
+}
+
+/// Save client_id to config file
+pub fn save_client_id(id: &str) {
+    let mut config = AppConfig::load();
+    config.client_id = Some(id.to_string());
+    if let Err(e) = config.save() {
+        warn!("Failed to save client_id to config: {}", e);
     }
 }
