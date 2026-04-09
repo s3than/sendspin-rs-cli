@@ -12,7 +12,51 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use crate::error::SendspinError;
 
-/// Audio output that uses the device's native format to avoid ALSA resampling.
+#[cfg(target_os = "linux")]
+use crate::alsa_output::AlsaAudioOutput;
+
+/// Unified audio output that dispatches between cpal (default) and direct ALSA.
+pub enum AudioOutput {
+    Cpal(NativeAudioOutput),
+    #[cfg(target_os = "linux")]
+    Alsa(AlsaAudioOutput),
+}
+
+impl AudioOutput {
+    /// Create a new audio output. When `device` is Some on Linux, uses direct ALSA;
+    /// otherwise uses cpal (PipeWire/default host).
+    pub fn new(
+        input_format: AudioFormat,
+        audio_buffer_frames: u32,
+        device: &Option<String>,
+    ) -> Result<Self, SendspinError> {
+        #[cfg(target_os = "linux")]
+        if let Some(alsa_device) = device {
+            return Ok(AudioOutput::Alsa(AlsaAudioOutput::new(
+                alsa_device,
+                &input_format,
+            )?));
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        let _ = device; // suppress unused warning
+
+        Ok(AudioOutput::Cpal(NativeAudioOutput::new(
+            input_format,
+            audio_buffer_frames,
+        )?))
+    }
+
+    pub fn write(&mut self, samples: &Arc<[Sample]>) -> Result<(), SendspinError> {
+        match self {
+            AudioOutput::Cpal(out) => out.write(samples),
+            #[cfg(target_os = "linux")]
+            AudioOutput::Alsa(out) => out.write(samples),
+        }
+    }
+}
+
+/// Audio output that uses cpal at the device's native format (default host).
 ///
 /// On Asahi Linux the device reports F32 44100Hz, but incoming audio may be
 /// 48000Hz. This struct builds the cpal stream at the device's native rate
@@ -86,97 +130,130 @@ impl NativeAudioOutput {
         };
         let mut resample_pos: f64 = 0.0;
 
-        let stream = device.build_output_stream(
-            &config,
-            move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                // Track latency
-                let ts = info.timestamp();
-                if let Some(latency) = ts.playback.duration_since(&ts.callback) {
-                    latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
-                }
-
-                for sample_out in data.iter_mut() {
-                    // Ensure we have a buffer
-                    let need_new = match current_buffer {
-                        Some(ref buf) => {
-                            if needs_resample {
-                                // For resampling, check if fractional pos exceeds buffer
-                                let max_pos = buf.len() / input_channels as usize;
-                                resample_pos >= max_pos as f64
-                            } else {
-                                buffer_pos >= buf.len()
-                            }
-                        }
-                        None => true,
-                    };
-
-                    if need_new
-                        && let Ok(rx) = sample_rx.lock()
-                        && let Ok(buf) = rx.try_recv()
-                    {
-                        current_buffer = Some(buf);
-                        buffer_pos = 0;
-                        resample_pos = 0.0;
-                    }
-
-                    if let Some(ref buf) = current_buffer {
-                        if needs_resample {
-                            // Linear interpolation resampling
-                            let frames = buf.len() / input_channels as usize;
-                            let frame_idx = resample_pos as usize;
-
-                            if frame_idx < frames {
-                                // Which output channel are we filling?
-                                // cpal interleaves channels: [L, R, L, R, ...]
-                                // We track which channel via buffer_pos % device_channels
-                                let out_ch = buffer_pos % device_channels as usize;
-                                let in_ch = if out_ch < input_channels as usize {
-                                    out_ch
-                                } else {
-                                    0 // downmix: repeat first channel
-                                };
-
-                                let idx0 = frame_idx * input_channels as usize + in_ch;
-                                let s0 = buf[idx0].to_f32();
-
-                                let s1 = if frame_idx + 1 < frames {
-                                    let idx1 = (frame_idx + 1) * input_channels as usize + in_ch;
-                                    buf[idx1].to_f32()
-                                } else {
-                                    s0
-                                };
-
-                                let frac = resample_pos - frame_idx as f64;
-                                *sample_out = s0 + (s1 - s0) * frac as f32;
-
-                                buffer_pos += 1;
-                                // Advance fractional position once per frame (after all channels)
-                                if buffer_pos.is_multiple_of(device_channels as usize) {
-                                    resample_pos += ratio;
-                                }
-                            } else {
-                                *sample_out = 0.0;
-                                buffer_pos += 1;
-                            }
-                        } else {
-                            // No resampling needed - direct copy
-                            if buffer_pos < buf.len() {
-                                *sample_out = buf[buffer_pos].to_f32();
-                                buffer_pos += 1;
-                            } else {
-                                *sample_out = 0.0;
-                            }
-                        }
+        // Shared callback state — produces the next sample as f32.
+        // Moved into a closure so the same logic works for all output formats.
+        let next_sample = move |current_buffer: &mut Option<Arc<[Sample]>>,
+                                buffer_pos: &mut usize,
+                                resample_pos: &mut f64|
+              -> f32 {
+            let need_new = match current_buffer {
+                Some(buf) => {
+                    if needs_resample {
+                        let max_pos = buf.len() / input_channels as usize;
+                        *resample_pos >= max_pos as f64
                     } else {
-                        *sample_out = 0.0;
+                        *buffer_pos >= buf.len()
                     }
                 }
-            },
-            |err| {
-                warn!("Audio stream error: {}", err);
-            },
-            None,
-        )?;
+                None => true,
+            };
+
+            if need_new
+                && let Ok(rx) = sample_rx.lock()
+                && let Ok(buf) = rx.try_recv()
+            {
+                *current_buffer = Some(buf);
+                *buffer_pos = 0;
+                *resample_pos = 0.0;
+            }
+
+            if let Some(buf) = current_buffer {
+                if needs_resample {
+                    let frames = buf.len() / input_channels as usize;
+                    let frame_idx = *resample_pos as usize;
+
+                    if frame_idx < frames {
+                        let out_ch = *buffer_pos % device_channels as usize;
+                        let in_ch = if out_ch < input_channels as usize {
+                            out_ch
+                        } else {
+                            0
+                        };
+
+                        let idx0 = frame_idx * input_channels as usize + in_ch;
+                        let s0 = buf[idx0].to_f32();
+
+                        let s1 = if frame_idx + 1 < frames {
+                            let idx1 = (frame_idx + 1) * input_channels as usize + in_ch;
+                            buf[idx1].to_f32()
+                        } else {
+                            s0
+                        };
+
+                        let frac = *resample_pos - frame_idx as f64;
+                        let val = s0 + (s1 - s0) * frac as f32;
+
+                        *buffer_pos += 1;
+                        if (*buffer_pos).is_multiple_of(device_channels as usize) {
+                            *resample_pos += ratio;
+                        }
+                        val
+                    } else {
+                        *buffer_pos += 1;
+                        0.0
+                    }
+                } else if *buffer_pos < buf.len() {
+                    let val = buf[*buffer_pos].to_f32();
+                    *buffer_pos += 1;
+                    val
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            }
+        };
+
+        // Build the stream using the device's native sample format.
+        let stream = match device_sample_format {
+            cpal::SampleFormat::I16 => device.build_output_stream(
+                &config,
+                move |data: &mut [i16], info: &cpal::OutputCallbackInfo| {
+                    let ts = info.timestamp();
+                    if let Some(latency) = ts.playback.duration_since(&ts.callback) {
+                        latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
+                    }
+                    for sample_out in data.iter_mut() {
+                        let val =
+                            next_sample(&mut current_buffer, &mut buffer_pos, &mut resample_pos);
+                        *sample_out = (val * i16::MAX as f32) as i16;
+                    }
+                },
+                |err| warn!("Audio stream error: {}", err),
+                None,
+            )?,
+            cpal::SampleFormat::I32 => device.build_output_stream(
+                &config,
+                move |data: &mut [i32], info: &cpal::OutputCallbackInfo| {
+                    let ts = info.timestamp();
+                    if let Some(latency) = ts.playback.duration_since(&ts.callback) {
+                        latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
+                    }
+                    for sample_out in data.iter_mut() {
+                        let val =
+                            next_sample(&mut current_buffer, &mut buffer_pos, &mut resample_pos);
+                        *sample_out = (val as f64 * i32::MAX as f64) as i32;
+                    }
+                },
+                |err| warn!("Audio stream error: {}", err),
+                None,
+            )?,
+            _ => device.build_output_stream(
+                &config,
+                move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                    let ts = info.timestamp();
+                    if let Some(latency) = ts.playback.duration_since(&ts.callback) {
+                        latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
+                    }
+                    for sample_out in data.iter_mut() {
+                        *sample_out =
+                            next_sample(&mut current_buffer, &mut buffer_pos, &mut resample_pos);
+                    }
+                },
+                |err| warn!("Audio stream error: {}", err),
+                None,
+            )?,
+        };
 
         stream.play()?;
 

@@ -15,6 +15,7 @@ pub struct AppConfig {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PlayerConfig {
     pub volume: Option<u8>,
+    pub device: Option<String>,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -86,5 +87,14 @@ pub fn save_client_id(id: &str) {
     config.client_id = Some(id.to_string());
     if let Err(e) = config.save() {
         warn!("Failed to save client_id to config: {}", e);
+    }
+}
+
+/// Save device to config file
+pub fn save_device(device: &str) {
+    let mut config = AppConfig::load();
+    config.player.device = Some(device.to_string());
+    if let Err(e) = config.save() {
+        warn!("Failed to save device to config: {}", e);
     }
 }
