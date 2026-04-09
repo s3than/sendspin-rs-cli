@@ -17,6 +17,9 @@ pub enum SendspinError {
     #[error("no output device available")]
     NoOutputDevice,
 
+    #[error("audio device not found: {0}")]
+    DeviceNotFound(String),
+
     #[error("config error: {0}")]
     Config(String),
 
@@ -31,4 +34,8 @@ pub enum SendspinError {
 
     #[error(transparent)]
     Mdns(#[from] mdns_sd::Error),
+
+    #[cfg(target_os = "linux")]
+    #[error("ALSA error: {0}")]
+    Alsa(#[from] alsa::Error),
 }

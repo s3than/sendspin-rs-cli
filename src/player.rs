@@ -7,7 +7,7 @@
 // - Stop/Resume commands
 // - Native device format output (avoids ALSA resampling)
 
-use crate::audio::NativeAudioOutput;
+use crate::audio::AudioOutput;
 use crate::error::SendspinError;
 use log::{error, info};
 use sendspin::audio::{AudioBuffer, Sample};
@@ -34,7 +34,7 @@ pub struct Player {
 
 impl Player {
     /// Create a new player and spawn the playback thread
-    pub fn new(initial_volume: u8, audio_buffer_frames: u32) -> Self {
+    pub fn new(initial_volume: u8, audio_buffer_frames: u32, device: Option<String>) -> Self {
         let audio_queue: Arc<Mutex<VecDeque<AudioBuffer>>> = Arc::new(Mutex::new(VecDeque::new()));
         let queue_condvar = Arc::new(Condvar::new());
         let current_volume = Arc::new(AtomicU8::new(initial_volume));
@@ -52,6 +52,7 @@ impl Player {
                 control_rx,
                 volume_clone,
                 audio_buffer_frames,
+                device,
             ) {
                 error!("Playback thread error: {}", e);
             }
@@ -101,8 +102,9 @@ impl Player {
         control_rx: mpsc::Receiver<PlaybackControl>,
         volume: Arc<AtomicU8>,
         audio_buffer_frames: u32,
+        device: Option<String>,
     ) -> Result<(), SendspinError> {
-        let mut output: Option<NativeAudioOutput> = None;
+        let mut output: Option<AudioOutput> = None;
         let mut stopped = true; // Start stopped
 
         loop {
@@ -165,7 +167,7 @@ impl Player {
 
                 // Initialize output if needed
                 if output.is_none() {
-                    match NativeAudioOutput::new(buffer.format.clone(), audio_buffer_frames) {
+                    match AudioOutput::new(buffer.format.clone(), audio_buffer_frames, &device) {
                         Ok(out) => {
                             info!(
                                 "Audio output initialized with volume {}",
@@ -213,13 +215,13 @@ mod tests {
 
     #[test]
     fn test_player_creation() {
-        let player = Player::new(75, 0);
+        let player = Player::new(75, 0, None);
         assert!(player.control_tx.send(PlaybackControl::Stop).is_ok());
     }
 
     #[test]
     fn test_enqueue_buffer() {
-        let player = Player::new(50, 0);
+        let player = Player::new(50, 0, None);
 
         let format = AudioFormat {
             codec: Codec::Pcm,
@@ -246,7 +248,7 @@ mod tests {
 
     #[test]
     fn test_stop_clears_queue() {
-        let player = Player::new(50, 0);
+        let player = Player::new(50, 0, None);
 
         let format = AudioFormat {
             codec: Codec::Pcm,
@@ -280,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_control_commands() {
-        let player = Player::new(50, 0);
+        let player = Player::new(50, 0, None);
 
         // Test all control commands send successfully
         assert!(player.control_tx.send(PlaybackControl::Stop).is_ok());
@@ -295,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_volume_control() {
-        let player = Player::new(50, 0);
+        let player = Player::new(50, 0, None);
 
         // Test volume bounds
         player.set_volume(0);

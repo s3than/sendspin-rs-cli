@@ -7,6 +7,8 @@
 // 4. Skip → Stop old + Start new (clean transition)
 // 5. All output is time-synced to play_at timestamps
 
+#[cfg(target_os = "linux")]
+pub mod alsa_output;
 pub mod audio;
 pub mod config;
 pub mod error;
@@ -63,12 +65,17 @@ struct Args {
     /// Audio device buffer size in frames (0 = system default, try 4096 on Asahi Linux)
     #[arg(long, default_value = "0")]
     audio_buffer: u32,
+    /// ALSA device string for direct output, bypassing PipeWire (e.g. "plughw:0,0")
+    #[cfg(target_os = "linux")]
+    #[arg(short, long)]
+    device: Option<String>,
 }
 
 struct ResolvedConfig {
     name: String,
     client_id: String,
     volume: u8,
+    device: Option<String>,
 }
 
 fn resolve_config(args: &Args) -> ResolvedConfig {
@@ -117,10 +124,23 @@ fn resolve_config(args: &Args) -> ResolvedConfig {
         args.volume.or(saved.player.volume).unwrap_or(30)
     };
 
+    // Resolve device: CLI arg > saved config > None (default host)
+    #[cfg(target_os = "linux")]
+    let device = match args.device.as_deref() {
+        Some(d) if !d.is_empty() => {
+            config::save_device(d);
+            Some(d.to_string())
+        }
+        _ => saved.player.device,
+    };
+    #[cfg(not(target_os = "linux"))]
+    let device = None;
+
     ResolvedConfig {
         name,
         client_id,
         volume,
+        device,
     }
 }
 
@@ -404,14 +424,18 @@ fn build_hello(config: &ResolvedConfig) -> ClientHello {
 pub async fn run() -> Result<(), SendspinError> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
+
     let resolved = resolve_config(&args);
 
     info!("Player name: {}", resolved.name);
     info!("Client ID: {}", resolved.client_id);
     info!("Initial volume: {}", resolved.volume);
+    if let Some(ref dev) = resolved.device {
+        info!("Audio device: {}", dev);
+    }
 
     // Create player with resolved volume (persists across reconnects)
-    let player = Player::new(resolved.volume, args.audio_buffer);
+    let player = Player::new(resolved.volume, args.audio_buffer, resolved.device.clone());
     let buffer_ms = args.buffer;
 
     let mut reconnect_delay = Duration::from_secs(2);
