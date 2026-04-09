@@ -9,6 +9,7 @@ A high-performance Rust CLI audio player that connects to [Music Assistant](http
 - 🎚️ **Volume Control** - Software-based volume scaling (0-100)
 - ⏯️ **Playback Control** - Stop, resume, and skip commands
 - 🔊 **Cross-Platform Audio** - Uses CPAL for Linux, macOS, and Windows support
+- 🐧 **Direct ALSA Output** - Linux-only `--device` flag bypasses PipeWire for headless/GDM use
 - 📦 **Lightweight** - Minimal dependencies, fast startup time
 - 🧵 **Multi-threaded** - Separate threads for network and audio output
 
@@ -37,7 +38,7 @@ sendspin-rs-cli --version
 ### Build from Source
 
 Requirements:
-- Rust 1.92 or later
+- Rust 1.85 or later (2024 edition)
 - ALSA development libraries (Linux only): `libasound2-dev`
 
 ```bash
@@ -77,6 +78,7 @@ Options:
       --reset-volume                 Ignore saved volume and use default (30) or the value from --volume
   -b, --buffer <BUFFER>              Buffer size in milliseconds [default: 20]
       --audio-buffer <AUDIO_BUFFER>  Audio device buffer size in frames (0 = system default) [default: 0]
+  -d, --device <DEVICE>              ALSA device string for direct output, bypassing PipeWire (Linux only)
   -h, --help                         Print help
       --version                      Print version
 ```
@@ -99,6 +101,18 @@ sendspin-rs-cli \
   --name "Bedroom Speaker" \
   --volume 75 \
   --server 192.168.1.100:8927
+```
+
+**Direct ALSA output (Linux only, bypasses PipeWire):**
+```bash
+# List available ALSA devices
+aplay -L
+
+# Use a specific ALSA device
+sendspin-rs-cli --device "front:CARD=M4,DEV=0"
+
+# Direct hardware access (useful for headless/GDM)
+sendspin-rs-cli --device "plughw:0,0"
 ```
 
 **Enable debug logging:**
@@ -148,6 +162,7 @@ name = "hostname"
 
 [player]
 volume = 65
+device = "front:CARD=M4,DEV=0"
 ```
 
 ## How It Works
@@ -177,8 +192,10 @@ volume = 65
 │  └─────┬─────┘  │
 │        │        │
 │  ┌─────▼─────┐  │
-│  │   CPAL    │  │
+│  │  Audio    │  │
 │  │  Output   │  │
+│  │ (cpal or  │  │
+│  │   ALSA)   │  │
 │  └───────────┘  │
 └─────────────────┘
          │
@@ -239,9 +256,10 @@ sendspin-rs-cli/
 │   ├── main.rs      # Thin entry point
 │   ├── lib.rs       # Crate root: connection loop, protocol handling
 │   ├── player.rs    # Audio playback, queue management, volume control
-│   ├── audio.rs     # Native audio output (cpal, resampling)
-│   ├── config.rs    # XDG config persistence (TOML)
-│   ├── error.rs     # SendspinError enum
+│   ├── audio.rs        # AudioOutput enum, cpal backend (resampling)
+│   ├── alsa_output.rs  # Direct ALSA backend (Linux only)
+│   ├── config.rs       # XDG config persistence (TOML)
+│   ├── error.rs        # SendspinError enum
 │   └── mdns.rs      # mDNS server discovery
 ├── tests/
 │   └── integration_test.rs  # Integration tests
@@ -275,6 +293,17 @@ sendspin-rs-cli --audio-buffer 4096
 A value of 4096 frames (~93ms at 44100Hz) works well. If you still hear stuttering,
 try 8192. The player automatically resamples to the device's native sample rate, so
 no additional configuration is needed.
+
+### Direct ALSA output not working
+
+If `--device` fails with a format error, the device may not support the stream's
+bit depth. The player automatically negotiates formats (tries S32, falls back to S16),
+but some devices have limited format support. Use `aplay -L` to list available devices
+and verify with:
+
+```bash
+aplay -D <device> --dump-hw-params -d 1 -f S16_LE -r 48000 -c 2 /dev/zero
+```
 
 ### Audio device errors (Linux)
 
@@ -315,6 +344,7 @@ Major dependencies:
 - **sendspin-rs**: Core Sendspin protocol implementation
 - **tokio**: Async runtime
 - **cpal**: Cross-platform audio I/O
+- **alsa**: Direct ALSA output (Linux only)
 - **tokio-tungstenite**: WebSocket client
 - **mdns-sd**: mDNS service discovery
 - **clap**: Command-line argument parsing
