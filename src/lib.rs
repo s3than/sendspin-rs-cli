@@ -362,7 +362,7 @@ fn detect_sleep(
             drift.as_secs()
         );
         return true;
-    } else if cfg!(target_os = "windows") && last_activity.elapsed() > Duration::from_secs(120) {
+    } else if last_activity.elapsed() > Duration::from_secs(300) {
         warn!(
             "No activity for {}s, assuming connection is dead",
             last_activity.elapsed().as_secs()
@@ -521,15 +521,24 @@ pub async fn run() -> Result<(), SendspinError> {
                     info!("Saved volume {} to config", vol);
                     std::process::exit(0);
                 }
-                Some(msg) = message_rx.recv() => {
-                    last_activity = Instant::now();
-                    handle_message(msg, &player, &ws_tx, &mut stream).await;
+                msg = message_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            last_activity = Instant::now();
+                            handle_message(msg, &player, &ws_tx, &mut stream).await;
+                        }
+                        None => break,
+                    }
                 }
-                Some(chunk) = audio_rx.recv() => {
-                    last_activity = Instant::now();
-                    handle_audio_chunk(&chunk, &mut stream, &player, &clock_sync, buffer_ms);
+                chunk = audio_rx.recv() => {
+                    match chunk {
+                        Some(chunk) => {
+                            last_activity = Instant::now();
+                            handle_audio_chunk(&chunk, &mut stream, &player, &clock_sync, buffer_ms);
+                        }
+                        None => break,
+                    }
                 }
-                else => break,
             }
         }
 
