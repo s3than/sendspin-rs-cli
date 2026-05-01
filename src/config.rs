@@ -16,6 +16,7 @@ pub struct AppConfig {
 pub struct PlayerConfig {
     pub volume: Option<u8>,
     pub device: Option<String>,
+    pub audio_buffer: Option<u32>,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -96,5 +97,14 @@ pub fn save_device(device: &str) {
     config.player.device = Some(device.to_string());
     if let Err(e) = config.save() {
         warn!("Failed to save device to config: {}", e);
+    }
+}
+
+/// Save audio buffer size to config file
+pub fn save_audio_buffer(frames: u32) {
+    let mut config = AppConfig::load();
+    config.player.audio_buffer = Some(frames);
+    if let Err(e) = config.save() {
+        warn!("Failed to save audio_buffer to config: {}", e);
     }
 }

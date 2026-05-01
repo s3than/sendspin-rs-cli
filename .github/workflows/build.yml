@@ -19,6 +19,7 @@ env:
 jobs:
   build-all:
     name: Build ${{ matrix.target }}
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     continue-on-error: ${{ matrix.experimental }}
     strategy:

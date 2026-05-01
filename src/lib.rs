@@ -63,8 +63,8 @@ struct Args {
     #[arg(short, long, default_value = "20")]
     buffer: u64,
     /// Audio device buffer size in frames (0 = system default, try 4096 on Asahi Linux)
-    #[arg(long, default_value = "0")]
-    audio_buffer: u32,
+    #[arg(long)]
+    audio_buffer: Option<u32>,
     /// ALSA device string for direct output, bypassing PipeWire (e.g. "plughw:0,0")
     #[cfg(target_os = "linux")]
     #[arg(short, long)]
@@ -76,6 +76,7 @@ struct ResolvedConfig {
     client_id: String,
     volume: u8,
     device: Option<String>,
+    audio_buffer: u32,
 }
 
 fn resolve_config(args: &Args) -> ResolvedConfig {
@@ -136,11 +137,21 @@ fn resolve_config(args: &Args) -> ResolvedConfig {
     #[cfg(not(target_os = "linux"))]
     let device = None;
 
+    // Resolve audio_buffer: CLI arg > saved config > 0 (system default)
+    let audio_buffer = match args.audio_buffer {
+        Some(frames) => {
+            config::save_audio_buffer(frames);
+            frames
+        }
+        None => saved.player.audio_buffer.unwrap_or(0),
+    };
+
     ResolvedConfig {
         name,
         client_id,
         volume,
         device,
+        audio_buffer,
     }
 }
 
@@ -362,7 +373,7 @@ fn detect_sleep(
             drift.as_secs()
         );
         return true;
-    } else if cfg!(target_os = "windows") && last_activity.elapsed() > Duration::from_secs(120) {
+    } else if last_activity.elapsed() > Duration::from_secs(300) {
         warn!(
             "No activity for {}s, assuming connection is dead",
             last_activity.elapsed().as_secs()
@@ -430,12 +441,19 @@ pub async fn run() -> Result<(), SendspinError> {
     info!("Player name: {}", resolved.name);
     info!("Client ID: {}", resolved.client_id);
     info!("Initial volume: {}", resolved.volume);
+    if resolved.audio_buffer > 0 {
+        info!("Audio buffer: {} frames", resolved.audio_buffer);
+    }
     if let Some(ref dev) = resolved.device {
         info!("Audio device: {}", dev);
     }
 
     // Create player with resolved volume (persists across reconnects)
-    let player = Player::new(resolved.volume, args.audio_buffer, resolved.device.clone());
+    let player = Player::new(
+        resolved.volume,
+        resolved.audio_buffer,
+        resolved.device.clone(),
+    );
     let buffer_ms = args.buffer;
 
     let mut reconnect_delay = Duration::from_secs(2);
@@ -521,15 +539,24 @@ pub async fn run() -> Result<(), SendspinError> {
                     info!("Saved volume {} to config", vol);
                     std::process::exit(0);
                 }
-                Some(msg) = message_rx.recv() => {
-                    last_activity = Instant::now();
-                    handle_message(msg, &player, &ws_tx, &mut stream).await;
+                msg = message_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            last_activity = Instant::now();
+                            handle_message(msg, &player, &ws_tx, &mut stream).await;
+                        }
+                        None => break,
+                    }
                 }
-                Some(chunk) = audio_rx.recv() => {
-                    last_activity = Instant::now();
-                    handle_audio_chunk(&chunk, &mut stream, &player, &clock_sync, buffer_ms);
+                chunk = audio_rx.recv() => {
+                    match chunk {
+                        Some(chunk) => {
+                            last_activity = Instant::now();
+                            handle_audio_chunk(&chunk, &mut stream, &player, &clock_sync, buffer_ms);
+                        }
+                        None => break,
+                    }
                 }
-                else => break,
             }
         }
 
@@ -541,5 +568,72 @@ pub async fn run() -> Result<(), SendspinError> {
         );
         tokio::time::sleep(reconnect_delay).await;
         reconnect_delay = (reconnect_delay * 2).min(max_reconnect_delay);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_sleep_false_when_no_drift_and_recent_activity() {
+        let mut last_wall = SystemTime::now();
+        let mut last_mono = Instant::now();
+        let last_activity = Instant::now();
+        assert!(!detect_sleep(
+            &mut last_wall,
+            &mut last_mono,
+            &last_activity
+        ));
+    }
+
+    #[test]
+    fn detect_sleep_true_on_wall_clock_drift() {
+        // Simulate 10s wall-clock elapsed with only 100ms monotonic elapsed → ~9.9s drift > 5s threshold
+        let mut last_wall = SystemTime::now() - Duration::from_secs(10);
+        let mut last_mono = Instant::now() - Duration::from_millis(100);
+        let last_activity = Instant::now();
+        assert!(detect_sleep(&mut last_wall, &mut last_mono, &last_activity));
+    }
+
+    #[test]
+    fn detect_sleep_true_on_inactivity_timeout() {
+        let mut last_wall = SystemTime::now();
+        let mut last_mono = Instant::now();
+        let last_activity = Instant::now() - Duration::from_secs(301);
+        assert!(detect_sleep(&mut last_wall, &mut last_mono, &last_activity));
+    }
+
+    #[test]
+    fn detect_sleep_updates_timestamps_on_false() {
+        let before = SystemTime::now();
+        let mut last_wall = before - Duration::from_millis(100);
+        let mut last_mono = Instant::now() - Duration::from_millis(100);
+        let last_activity = Instant::now();
+        assert!(!detect_sleep(
+            &mut last_wall,
+            &mut last_mono,
+            &last_activity
+        ));
+        assert!(last_wall >= before);
+    }
+
+    // Verifies the select! pattern change: a closed channel's None is caught in the
+    // recv branch itself, so the loop breaks even when a sleep branch is always ready.
+    #[tokio::test]
+    async fn select_breaks_when_channel_closes() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<u32>(1);
+        drop(tx);
+
+        let broke = loop {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(50)) => continue,
+                v = rx.recv() => match v {
+                    Some(_) => {}
+                    None => break true,
+                }
+            }
+        };
+        assert!(broke);
     }
 }
