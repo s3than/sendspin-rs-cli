@@ -449,7 +449,11 @@ pub async fn run() -> Result<(), SendspinError> {
     }
 
     // Create player with resolved volume (persists across reconnects)
-    let player = Player::new(resolved.volume, resolved.audio_buffer, resolved.device.clone());
+    let player = Player::new(
+        resolved.volume,
+        resolved.audio_buffer,
+        resolved.device.clone(),
+    );
     let buffer_ms = args.buffer;
 
     let mut reconnect_delay = Duration::from_secs(2);
@@ -576,7 +580,11 @@ mod tests {
         let mut last_wall = SystemTime::now();
         let mut last_mono = Instant::now();
         let last_activity = Instant::now();
-        assert!(!detect_sleep(&mut last_wall, &mut last_mono, &last_activity));
+        assert!(!detect_sleep(
+            &mut last_wall,
+            &mut last_mono,
+            &last_activity
+        ));
     }
 
     #[test]
@@ -602,7 +610,11 @@ mod tests {
         let mut last_wall = before - Duration::from_millis(100);
         let mut last_mono = Instant::now() - Duration::from_millis(100);
         let last_activity = Instant::now();
-        assert!(!detect_sleep(&mut last_wall, &mut last_mono, &last_activity));
+        assert!(!detect_sleep(
+            &mut last_wall,
+            &mut last_mono,
+            &last_activity
+        ));
         assert!(last_wall >= before);
     }
 
