@@ -356,11 +356,7 @@ fn handle_audio_chunk(
 }
 
 /// Returns true if system sleep was detected and the connection should be dropped
-fn detect_sleep(
-    last_wall: &mut SystemTime,
-    last_mono: &mut Instant,
-    last_activity: &Instant,
-) -> bool {
+fn detect_sleep(last_wall: &mut SystemTime, last_mono: &mut Instant) -> bool {
     let wall_elapsed = SystemTime::now()
         .duration_since(*last_wall)
         .unwrap_or_default();
@@ -371,12 +367,6 @@ fn detect_sleep(
         warn!(
             "System sleep detected ({}s wall-clock drift), reconnecting...",
             drift.as_secs()
-        );
-        return true;
-    } else if last_activity.elapsed() > Duration::from_secs(300) {
-        warn!(
-            "No activity for {}s, assuming connection is dead",
-            last_activity.elapsed().as_secs()
         );
         return true;
     }
@@ -519,11 +509,10 @@ pub async fn run() -> Result<(), SendspinError> {
         let mut stream = StreamState::new();
         let mut last_wall = SystemTime::now();
         let mut last_mono = Instant::now();
-        let mut last_activity = Instant::now();
 
         // Message handling loop
         loop {
-            if detect_sleep(&mut last_wall, &mut last_mono, &last_activity) {
+            if detect_sleep(&mut last_wall, &mut last_mono) {
                 break;
             }
 
@@ -542,7 +531,6 @@ pub async fn run() -> Result<(), SendspinError> {
                 msg = message_rx.recv() => {
                     match msg {
                         Some(msg) => {
-                            last_activity = Instant::now();
                             handle_message(msg, &player, &ws_tx, &mut stream).await;
                         }
                         None => break,
@@ -551,7 +539,6 @@ pub async fn run() -> Result<(), SendspinError> {
                 chunk = audio_rx.recv() => {
                     match chunk {
                         Some(chunk) => {
-                            last_activity = Instant::now();
                             handle_audio_chunk(&chunk, &mut stream, &player, &clock_sync, buffer_ms);
                         }
                         None => break,
@@ -576,15 +563,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detect_sleep_false_when_no_drift_and_recent_activity() {
+    fn detect_sleep_false_when_no_drift() {
         let mut last_wall = SystemTime::now();
         let mut last_mono = Instant::now();
-        let last_activity = Instant::now();
-        assert!(!detect_sleep(
-            &mut last_wall,
-            &mut last_mono,
-            &last_activity
-        ));
+        assert!(!detect_sleep(&mut last_wall, &mut last_mono));
     }
 
     #[test]
@@ -592,16 +574,7 @@ mod tests {
         // Simulate 10s wall-clock elapsed with only 100ms monotonic elapsed → ~9.9s drift > 5s threshold
         let mut last_wall = SystemTime::now() - Duration::from_secs(10);
         let mut last_mono = Instant::now() - Duration::from_millis(100);
-        let last_activity = Instant::now();
-        assert!(detect_sleep(&mut last_wall, &mut last_mono, &last_activity));
-    }
-
-    #[test]
-    fn detect_sleep_true_on_inactivity_timeout() {
-        let mut last_wall = SystemTime::now();
-        let mut last_mono = Instant::now();
-        let last_activity = Instant::now() - Duration::from_secs(301);
-        assert!(detect_sleep(&mut last_wall, &mut last_mono, &last_activity));
+        assert!(detect_sleep(&mut last_wall, &mut last_mono));
     }
 
     #[test]
@@ -609,12 +582,7 @@ mod tests {
         let before = SystemTime::now();
         let mut last_wall = before - Duration::from_millis(100);
         let mut last_mono = Instant::now() - Duration::from_millis(100);
-        let last_activity = Instant::now();
-        assert!(!detect_sleep(
-            &mut last_wall,
-            &mut last_mono,
-            &last_activity
-        ));
+        assert!(!detect_sleep(&mut last_wall, &mut last_mono));
         assert!(last_wall >= before);
     }
 
