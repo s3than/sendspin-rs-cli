@@ -17,9 +17,59 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install ALSA development libraries
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - name: Run tests
+        run: cargo test --verbose
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install ALSA development libraries
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
   build-all:
     name: Build ${{ matrix.target }}
     if: github.event_name != 'pull_request'
+    needs: [test, clippy, fmt]
     runs-on: ubuntu-latest
     continue-on-error: ${{ matrix.experimental }}
     strategy:
@@ -165,55 +215,6 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: artifacts/*
           retention-days: 7
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install ALSA development libraries
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-
-      - name: Run tests
-        run: cargo test --verbose
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Install ALSA development libraries
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-
-      - name: Run clippy
-        run: cargo clippy -- -D warnings
-
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-
-      - name: Check formatting
-        run: cargo fmt -- --check
 
   create-release:
     name: Create GitHub Release
