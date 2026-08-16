@@ -4,9 +4,11 @@
 // On hosts like Asahi Linux the device may report F32 44100Hz while incoming
 // audio is 48000Hz; this module handles the rate conversion in the audio callback.
 
+use cpal::Sample as _;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{info, warn};
-use sendspin::audio::{AudioFormat, Sample};
+use sendspin::audio::AudioFormat;
+use sendspin::audio::types::Sample;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -171,11 +173,11 @@ impl NativeAudioOutput {
                         };
 
                         let idx0 = frame_idx * input_channels as usize + in_ch;
-                        let s0 = buf[idx0].to_f32();
+                        let s0 = f32::from_sample(buf[idx0]);
 
                         let s1 = if frame_idx + 1 < frames {
                             let idx1 = (frame_idx + 1) * input_channels as usize + in_ch;
-                            buf[idx1].to_f32()
+                            f32::from_sample(buf[idx1])
                         } else {
                             s0
                         };
@@ -193,7 +195,7 @@ impl NativeAudioOutput {
                         0.0
                     }
                 } else if *buffer_pos < buf.len() {
-                    let val = buf[*buffer_pos].to_f32();
+                    let val = f32::from_sample(buf[*buffer_pos]);
                     *buffer_pos += 1;
                     val
                 } else {

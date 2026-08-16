@@ -10,11 +10,12 @@
 use crate::audio::AudioOutput;
 use crate::error::SendspinError;
 use log::{error, info};
-use sendspin::audio::{AudioBuffer, Sample};
+use sendspin::audio::AudioFormat;
+use sendspin::audio::types::Sample;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Player control commands
 #[derive(Debug, Clone)]
@@ -24,9 +25,21 @@ pub enum PlaybackControl {
     SetVolume(u8), // Set volume 0-100
 }
 
+/// A decoded audio buffer scheduled for local playback.
+///
+/// sendspin's own `AudioBuffer` no longer carries a local play time (0.3.0
+/// dropped it in favor of live scheduling via `SyncedPlayer`); this CLI keeps
+/// its own hand-rolled queue/output path (for direct-ALSA support), so it
+/// tracks `play_at` itself instead.
+pub struct QueuedBuffer {
+    pub play_at: Instant,
+    pub samples: Arc<[Sample]>,
+    pub format: AudioFormat,
+}
+
 /// Audio Player
 pub struct Player {
-    audio_queue: Arc<Mutex<VecDeque<AudioBuffer>>>,
+    audio_queue: Arc<Mutex<VecDeque<QueuedBuffer>>>,
     queue_condvar: Arc<Condvar>,
     control_tx: mpsc::Sender<PlaybackControl>,
     current_volume: Arc<AtomicU8>,
@@ -35,7 +48,7 @@ pub struct Player {
 impl Player {
     /// Create a new player and spawn the playback thread
     pub fn new(initial_volume: u8, audio_buffer_frames: u32, device: Option<String>) -> Self {
-        let audio_queue: Arc<Mutex<VecDeque<AudioBuffer>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let audio_queue: Arc<Mutex<VecDeque<QueuedBuffer>>> = Arc::new(Mutex::new(VecDeque::new()));
         let queue_condvar = Arc::new(Condvar::new());
         let current_volume = Arc::new(AtomicU8::new(initial_volume));
         let queue_clone = Arc::clone(&audio_queue);
@@ -67,7 +80,7 @@ impl Player {
     }
 
     /// Add an audio buffer to the playback queue
-    pub fn enqueue(&self, buffer: AudioBuffer) {
+    pub fn enqueue(&self, buffer: QueuedBuffer) {
         self.audio_queue.lock().unwrap().push_back(buffer);
         self.queue_condvar.notify_one();
     }
@@ -97,7 +110,7 @@ impl Player {
 
     /// Playback thread - handles audio output
     fn playback_thread(
-        queue: Arc<Mutex<VecDeque<AudioBuffer>>>,
+        queue: Arc<Mutex<VecDeque<QueuedBuffer>>>,
         condvar: Arc<Condvar>,
         control_rx: mpsc::Receiver<PlaybackControl>,
         volume: Arc<AtomicU8>,
@@ -189,7 +202,7 @@ impl Player {
                     let scaled_samples: Vec<_> = buffer
                         .samples
                         .iter()
-                        .map(|sample| Sample((sample.0 as f32 * volume_factor) as i32))
+                        .map(|sample| (*sample as f32 * volume_factor) as Sample)
                         .collect();
                     std::sync::Arc::from(scaled_samples.into_boxed_slice())
                 } else {
@@ -210,7 +223,7 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sendspin::audio::{AudioFormat, Codec, Sample};
+    use sendspin::audio::Codec;
     use std::time::Instant;
 
     #[test]
@@ -231,9 +244,8 @@ mod tests {
             codec_header: None,
         };
 
-        let samples = vec![Sample(0); 1024];
-        let buffer = AudioBuffer {
-            timestamp: 0,
+        let samples: Vec<Sample> = vec![0; 1024];
+        let buffer = QueuedBuffer {
             format,
             samples: Arc::from(samples.into_boxed_slice()),
             play_at: Instant::now(),
@@ -260,9 +272,8 @@ mod tests {
 
         // Add multiple buffers
         for _ in 0..5 {
-            let samples = vec![Sample(0); 1024];
-            let buffer = AudioBuffer {
-                timestamp: 0,
+            let samples: Vec<Sample> = vec![0; 1024];
+            let buffer = QueuedBuffer {
                 format: format.clone(),
                 samples: Arc::from(samples.into_boxed_slice()),
                 play_at: Instant::now(),

@@ -17,13 +17,14 @@ pub mod player;
 
 use clap::Parser;
 use log::{debug, error, info, warn};
-use player::Player;
+use player::{Player, QueuedBuffer};
+use sendspin::ProtocolClientBuilder;
 use sendspin::audio::decode::{Decoder, PcmDecoder, PcmEndian};
-use sendspin::audio::{AudioBuffer, AudioFormat, Codec};
-use sendspin::protocol::client::{ProtocolClient, WsSender};
+use sendspin::audio::{AudioFormat, Codec};
+use sendspin::protocol::client::{AudioChunk, WsSender};
 use sendspin::protocol::messages::{
-    AudioFormatSpec, ClientHello, ClientState, DeviceInfo, GroupUpdate, Message, PlayerState,
-    PlayerSyncState, PlayerV1Support, ServerState,
+    AudioFormatSpec, ClientState, ClientSyncState, GroupUpdate, Message, PlayerCommandType,
+    PlayerState, PlayerV1Support, ServerState,
 };
 use sendspin::sync::ClockSync;
 use std::sync::Arc;
@@ -33,10 +34,11 @@ use crate::error::SendspinError;
 
 async fn send_player_state(ws_tx: &WsSender, volume: u8, muted: bool) {
     let state = Message::ClientState(ClientState {
+        state: Some(ClientSyncState::Synchronized),
         player: Some(PlayerState {
-            state: PlayerSyncState::Synchronized,
             volume: Some(volume),
             muted: Some(muted),
+            ..Default::default()
         }),
     });
     let _ = ws_tx.send_message(state).await;
@@ -237,18 +239,11 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
         }
         Message::ServerCommand(command) => {
             if let Some(player_cmd) = &command.player {
-                match player_cmd.command.as_str() {
-                    "pause" | "stop" => {
-                        info!("→ Handling pause/stop command");
-                        player.stop();
-                        send_player_state(ws_tx, player.volume(), false).await;
-                    }
-                    "play" => {
-                        info!("→ Handling play command");
-                        player.resume();
-                        send_player_state(ws_tx, player.volume(), false).await;
-                    }
-                    "volume" => {
+                match player_cmd.command {
+                    // Play/pause/stop are no longer sent as player commands —
+                    // the server conveys them via stream/start, stream/end,
+                    // and stream/clear, which are already handled above.
+                    PlayerCommandType::Volume => {
                         if let Some(vol) = player_cmd.volume {
                             info!("← Setting volume to {}", vol);
                             player.set_volume(vol);
@@ -258,7 +253,7 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
                         }
                     }
                     _ => {
-                        debug!("Unknown command: {}", player_cmd.command);
+                        debug!("Unhandled player command: {:?}", player_cmd.command);
                     }
                 }
             }
@@ -312,7 +307,7 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
 }
 
 fn handle_audio_chunk(
-    chunk: &sendspin::protocol::client::AudioChunk,
+    chunk: &AudioChunk,
     stream: &mut StreamState,
     player: &Player,
     clock_sync: &Arc<parking_lot::Mutex<ClockSync>>,
@@ -344,8 +339,7 @@ fn handle_audio_chunk(
         };
         drop(sync);
 
-        let buffer = AudioBuffer {
-            timestamp: chunk.timestamp,
+        let buffer = QueuedBuffer {
             play_at,
             samples,
             format: fmt.clone(),
@@ -376,18 +370,14 @@ fn detect_sleep(last_wall: &mut SystemTime, last_mono: &mut Instant) -> bool {
     false
 }
 
-fn build_hello(config: &ResolvedConfig) -> ClientHello {
-    ClientHello {
-        client_id: config.client_id.clone(),
-        name: config.name.clone(),
-        version: 1,
-        supported_roles: vec!["player@v1".to_string(), "controller@v1".to_string()],
-        device_info: Some(DeviceInfo {
-            product_name: Some(config.name.clone()),
-            manufacturer: Some("Sendspin-RS".to_string()),
-            software_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        }),
-        player_v1_support: Some(PlayerV1Support {
+fn build_client(config: &ResolvedConfig) -> ProtocolClientBuilder {
+    ProtocolClientBuilder::builder()
+        .client_id(config.client_id.clone())
+        .name(config.name.clone())
+        .product_name(Some(config.name.clone()))
+        .manufacturer(Some("Sendspin-RS".to_string()))
+        .software_version(Some(env!("CARGO_PKG_VERSION").to_string()))
+        .player_v1_support(PlayerV1Support {
             supported_formats: vec![
                 AudioFormatSpec {
                     codec: "pcm".to_string(),
@@ -416,10 +406,14 @@ fn build_hello(config: &ResolvedConfig) -> ClientHello {
             ],
             buffer_capacity: 1048576,
             supported_commands: vec!["volume".to_string(), "mute".to_string()],
-        }),
-        artwork_v1_support: None,
-        visualizer_v1_support: None,
-    }
+        })
+        .controller()
+        .initial_player_state(PlayerState {
+            volume: Some(config.volume),
+            muted: Some(false),
+            ..Default::default()
+        })
+        .build()
 }
 
 pub async fn run() -> Result<(), SendspinError> {
@@ -477,23 +471,27 @@ pub async fn run() -> Result<(), SendspinError> {
         let ws_url = format!("ws://{}/sendspin", server_addr);
         info!("Connecting to {}...", ws_url);
 
-        let hello = build_hello(&resolved);
+        let client_builder = build_client(&resolved);
 
         // Connect to server
-        let (mut message_rx, mut audio_rx, clock_sync, ws_tx, _guard) =
-            match ProtocolClient::connect(&ws_url, hello).await {
-                Ok(client) => client.split(),
-                Err(e) => {
-                    warn!(
-                        "Connection failed: {}. Retrying in {}s...",
-                        e,
-                        reconnect_delay.as_secs()
-                    );
-                    tokio::time::sleep(reconnect_delay).await;
-                    reconnect_delay = (reconnect_delay * 2).min(max_reconnect_delay);
-                    continue;
-                }
-            };
+        let connection = match client_builder.connect(&ws_url).await {
+            Ok(client) => client.split(),
+            Err(e) => {
+                warn!(
+                    "Connection failed: {}. Retrying in {}s...",
+                    e,
+                    reconnect_delay.as_secs()
+                );
+                tokio::time::sleep(reconnect_delay).await;
+                reconnect_delay = (reconnect_delay * 2).min(max_reconnect_delay);
+                continue;
+            }
+        };
+        let mut message_rx = connection.messages;
+        let mut audio_rx = connection.audio;
+        let clock_sync = connection.clock_sync;
+        let ws_tx = connection.sender;
+        let _guard = connection.guard;
 
         // Connected successfully — reset backoff
         reconnect_delay = Duration::from_secs(2);

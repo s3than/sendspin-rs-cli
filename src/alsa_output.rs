@@ -8,8 +8,10 @@
 
 use alsa::pcm::{Access, Format, HwParams, PCM};
 use alsa::{Direction, ValueOr};
+use cpal::Sample as _;
 use log::info;
-use sendspin::audio::{AudioFormat, Sample};
+use sendspin::audio::AudioFormat;
+use sendspin::audio::types::Sample;
 use std::sync::Arc;
 
 use crate::error::SendspinError;
@@ -135,16 +137,16 @@ impl AlsaAudioOutput {
                 .pcm
                 .io_i32()
                 .map_err(|e| SendspinError::Audio(format!("ALSA io_i32 failed: {}", e)))?;
-            // Sample.0 is 24-bit in lower bits — shift left 8 to fill S32
-            let buf: Vec<i32> = samples.iter().map(|s| s.0 << 8).collect();
+            // Samples already fill the full i32 range (sendspin decodes via
+            // cpal's Sample::from_sample scaling) — write through as-is.
+            let buf: Vec<i32> = samples.to_vec();
             self.write_all(&io, &buf)?;
         } else {
             let io = self
                 .pcm
                 .io_i16()
                 .map_err(|e| SendspinError::Audio(format!("ALSA io_i16 failed: {}", e)))?;
-            // Sample.0 is 24-bit in lower bits — shift right 8 to fit S16
-            let buf: Vec<i16> = samples.iter().map(|s| s.to_i16()).collect();
+            let buf: Vec<i16> = samples.iter().map(|s| i16::from_sample(*s)).collect();
             self.write_all(&io, &buf)?;
         }
         Ok(())
