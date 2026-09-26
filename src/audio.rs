@@ -70,8 +70,37 @@ pub struct NativeAudioOutput {
 }
 
 impl NativeAudioOutput {
+    /// Prefer cpal's native PipeWire host over the default (ALSA) host on Linux.
+    ///
+    /// The default ALSA host talks to PipeWire's ALSA-compatibility shim
+    /// (`pcm_pipewire`), which is unstable against Bluetooth A2DP sinks and can
+    /// spin in a tight `POLLERR` retry loop with no backoff (pegging a CPU core).
+    /// The native PipeWire host is a real PipeWire client and doesn't hit this.
+    ///
+    /// Falls back to `cpal::default_host()` when PipeWire isn't available (e.g.
+    /// non-PipeWire distros, or a session without a PipeWire server running) so
+    /// this only changes behavior when PipeWire is actually present.
+    fn select_host() -> cpal::Host {
+        #[cfg(target_os = "linux")]
+        {
+            match cpal::host_from_id(cpal::HostId::PipeWire) {
+                Ok(host) => {
+                    info!("Using PipeWire audio host");
+                    return host;
+                }
+                Err(err) => {
+                    warn!(
+                        "PipeWire audio host unavailable ({}), falling back to default host",
+                        err
+                    );
+                }
+            }
+        }
+        cpal::default_host()
+    }
+
     pub fn new(input_format: AudioFormat, audio_buffer_frames: u32) -> Result<Self, SendspinError> {
-        let host = cpal::default_host();
+        let host = Self::select_host();
         let device = host
             .default_output_device()
             .ok_or(SendspinError::NoOutputDevice)?;
@@ -209,12 +238,11 @@ impl NativeAudioOutput {
         // Build the stream using the device's native sample format.
         let stream = match device_sample_format {
             cpal::SampleFormat::I16 => device.build_output_stream(
-                &config,
+                config.clone(),
                 move |data: &mut [i16], info: &cpal::OutputCallbackInfo| {
                     let ts = info.timestamp();
-                    if let Some(latency) = ts.playback.duration_since(&ts.callback) {
-                        latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
-                    }
+                    let latency = ts.playback.duration_since(ts.callback);
+                    latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
                     for sample_out in data.iter_mut() {
                         let val =
                             next_sample(&mut current_buffer, &mut buffer_pos, &mut resample_pos);
@@ -225,12 +253,11 @@ impl NativeAudioOutput {
                 None,
             )?,
             cpal::SampleFormat::I32 => device.build_output_stream(
-                &config,
+                config.clone(),
                 move |data: &mut [i32], info: &cpal::OutputCallbackInfo| {
                     let ts = info.timestamp();
-                    if let Some(latency) = ts.playback.duration_since(&ts.callback) {
-                        latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
-                    }
+                    let latency = ts.playback.duration_since(ts.callback);
+                    latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
                     for sample_out in data.iter_mut() {
                         let val =
                             next_sample(&mut current_buffer, &mut buffer_pos, &mut resample_pos);
@@ -241,12 +268,11 @@ impl NativeAudioOutput {
                 None,
             )?,
             _ => device.build_output_stream(
-                &config,
+                config.clone(),
                 move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
                     let ts = info.timestamp();
-                    if let Some(latency) = ts.playback.duration_since(&ts.callback) {
-                        latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
-                    }
+                    let latency = ts.playback.duration_since(ts.callback);
+                    latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
                     for sample_out in data.iter_mut() {
                         *sample_out =
                             next_sample(&mut current_buffer, &mut buffer_pos, &mut resample_pos);

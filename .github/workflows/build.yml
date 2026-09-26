@@ -27,8 +27,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install ALSA development libraries
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Install ALSA and PipeWire development libraries
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpipewire-0.3-dev clang libclang-dev
 
       - name: Run tests
         run: cargo test --verbose
@@ -45,8 +45,8 @@ jobs:
         with:
           components: clippy
 
-      - name: Install ALSA development libraries
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Install ALSA and PipeWire development libraries
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpipewire-0.3-dev clang libclang-dev
 
       - name: Run clippy
         run: cargo clippy -- -D warnings
@@ -113,9 +113,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install ALSA development libraries (Linux native)
+      - name: Install ALSA and PipeWire development libraries (Linux native)
         if: matrix.build_tool == 'cargo' && runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpipewire-0.3-dev clang libclang-dev
 
       - name: Install Zig
         if: matrix.build_tool == 'zigbuild'
