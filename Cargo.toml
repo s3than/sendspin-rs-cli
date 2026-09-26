@@ -1,6 +1,6 @@
 [package]
 name = "sendspin-rs-cli"
-version = "0.0.9-beta"
+version = "0.0.10"
 edition = "2024"
 
 [dependencies]
