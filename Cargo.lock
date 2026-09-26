@@ -1563,7 +1563,7 @@ dependencies = [
 
 [[package]]
 name = "sendspin-rs-cli"
-version = "0.0.9-beta"
+version = "0.0.10"
 dependencies = [
  "alsa",
  "anyhow",
