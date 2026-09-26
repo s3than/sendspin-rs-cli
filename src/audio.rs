@@ -9,8 +9,9 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{info, warn};
 use sendspin::audio::AudioFormat;
 use sendspin::audio::types::Sample;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use crate::error::SendspinError;
 
@@ -58,6 +59,92 @@ impl AudioOutput {
     }
 }
 
+/// Rate-limits repeated audio stream error logs.
+///
+/// Some backends can retry a broken stream in a tight loop with no backoff
+/// (e.g. the ALSA host against certain devices, notably PipeWire's
+/// ALSA-compatibility shim against Bluetooth A2DP sinks), firing the error
+/// callback thousands of times a second. Logging every occurrence floods the
+/// journal and burns CPU on string formatting on top of whatever the backend
+/// itself is spinning on. This logs at most once per second and reports how
+/// many occurrences were suppressed in between.
+struct ErrorRateLimiter {
+    last_logged: Mutex<Instant>,
+    suppressed: AtomicU32,
+}
+
+impl ErrorRateLimiter {
+    fn new() -> Self {
+        Self {
+            // Backdate so the first error logs immediately.
+            last_logged: Mutex::new(Instant::now() - Duration::from_secs(1)),
+            suppressed: AtomicU32::new(0),
+        }
+    }
+
+    fn log(&self, err: cpal::Error) {
+        let now = Instant::now();
+        let mut last = self.last_logged.lock().unwrap();
+        if now.duration_since(*last) >= Duration::from_secs(1) {
+            *last = now;
+            let suppressed = self.suppressed.swap(0, Ordering::Relaxed);
+            if suppressed > 0 {
+                warn!(
+                    "Audio stream error: {} ({} more suppressed in the last second)",
+                    err, suppressed
+                );
+            } else {
+                warn!("Audio stream error: {}", err);
+            }
+        } else {
+            self.suppressed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod error_rate_limiter_tests {
+    use super::*;
+
+    fn dummy_error() -> cpal::Error {
+        cpal::Error::from(cpal::ErrorKind::Xrun)
+    }
+
+    #[test]
+    fn first_error_is_not_suppressed() {
+        let limiter = ErrorRateLimiter::new();
+        limiter.log(dummy_error());
+        assert_eq!(limiter.suppressed.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn rapid_repeats_within_the_window_are_suppressed_not_logged_individually() {
+        let limiter = ErrorRateLimiter::new();
+        limiter.log(dummy_error()); // logs immediately, opens the 1s window
+        for _ in 0..999 {
+            limiter.log(dummy_error());
+        }
+        // None of these should have logged (or reset the window) since
+        // they land inside the same second as the first log.
+        assert_eq!(limiter.suppressed.load(Ordering::Relaxed), 999);
+    }
+
+    #[test]
+    fn window_elapsing_flushes_the_suppressed_count_and_logs_again() {
+        let limiter = ErrorRateLimiter::new();
+        limiter.log(dummy_error());
+        limiter.log(dummy_error());
+        assert_eq!(limiter.suppressed.load(Ordering::Relaxed), 1);
+
+        // Simulate a second passing without a real sleep in the test.
+        *limiter.last_logged.lock().unwrap() = Instant::now() - Duration::from_secs(2);
+
+        limiter.log(dummy_error());
+        // Crossing the window boundary logs again and resets the counter.
+        assert_eq!(limiter.suppressed.load(Ordering::Relaxed), 0);
+    }
+}
+
 /// Audio output that uses cpal at the device's native format (default host).
 ///
 /// On Asahi Linux the device reports F32 44100Hz, but incoming audio may be
@@ -70,8 +157,37 @@ pub struct NativeAudioOutput {
 }
 
 impl NativeAudioOutput {
+    /// Prefer cpal's native PipeWire host over the default (ALSA) host on Linux.
+    ///
+    /// The default ALSA host talks to PipeWire's ALSA-compatibility shim
+    /// (`pcm_pipewire`), which is unstable against Bluetooth A2DP sinks and can
+    /// spin in a tight `POLLERR` retry loop with no backoff (pegging a CPU core).
+    /// The native PipeWire host is a real PipeWire client and doesn't hit this.
+    ///
+    /// Falls back to `cpal::default_host()` when PipeWire isn't available (e.g.
+    /// non-PipeWire distros, or a session without a PipeWire server running) so
+    /// this only changes behavior when PipeWire is actually present.
+    fn select_host() -> cpal::Host {
+        #[cfg(target_os = "linux")]
+        {
+            match cpal::host_from_id(cpal::HostId::PipeWire) {
+                Ok(host) => {
+                    info!("Using PipeWire audio host");
+                    return host;
+                }
+                Err(err) => {
+                    warn!(
+                        "PipeWire audio host unavailable ({}), falling back to default host",
+                        err
+                    );
+                }
+            }
+        }
+        cpal::default_host()
+    }
+
     pub fn new(input_format: AudioFormat, audio_buffer_frames: u32) -> Result<Self, SendspinError> {
-        let host = cpal::default_host();
+        let host = Self::select_host();
         let device = host
             .default_output_device()
             .ok_or(SendspinError::NoOutputDevice)?;
@@ -92,7 +208,7 @@ impl NativeAudioOutput {
 
         let input_rate = input_format.sample_rate;
         let input_channels = input_format.channels as u16;
-        let needs_resample = input_rate != device_sample_rate as u32;
+        let needs_resample = input_rate != device_sample_rate;
 
         if needs_resample {
             info!(
@@ -119,12 +235,13 @@ impl NativeAudioOutput {
 
         let latency_micros = Arc::new(AtomicU64::new(0));
         let latency_clone = Arc::clone(&latency_micros);
+        let error_limiter = Arc::new(ErrorRateLimiter::new());
 
         // State for the audio callback
         let mut current_buffer: Option<Arc<[Sample]>> = None;
         let mut buffer_pos: usize = 0;
         // Resampling state: fractional position in the input buffer
-        let device_rate_u32 = device_sample_rate as u32;
+        let device_rate_u32 = device_sample_rate;
         let ratio = if needs_resample {
             input_rate as f64 / device_rate_u32 as f64
         } else {
@@ -209,50 +326,47 @@ impl NativeAudioOutput {
         // Build the stream using the device's native sample format.
         let stream = match device_sample_format {
             cpal::SampleFormat::I16 => device.build_output_stream(
-                &config,
+                config,
                 move |data: &mut [i16], info: &cpal::OutputCallbackInfo| {
                     let ts = info.timestamp();
-                    if let Some(latency) = ts.playback.duration_since(&ts.callback) {
-                        latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
-                    }
+                    let latency = ts.playback.duration_since(ts.callback);
+                    latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
                     for sample_out in data.iter_mut() {
                         let val =
                             next_sample(&mut current_buffer, &mut buffer_pos, &mut resample_pos);
                         *sample_out = (val * i16::MAX as f32) as i16;
                     }
                 },
-                |err| warn!("Audio stream error: {}", err),
+                move |err| error_limiter.log(err),
                 None,
             )?,
             cpal::SampleFormat::I32 => device.build_output_stream(
-                &config,
+                config,
                 move |data: &mut [i32], info: &cpal::OutputCallbackInfo| {
                     let ts = info.timestamp();
-                    if let Some(latency) = ts.playback.duration_since(&ts.callback) {
-                        latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
-                    }
+                    let latency = ts.playback.duration_since(ts.callback);
+                    latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
                     for sample_out in data.iter_mut() {
                         let val =
                             next_sample(&mut current_buffer, &mut buffer_pos, &mut resample_pos);
                         *sample_out = (val as f64 * i32::MAX as f64) as i32;
                     }
                 },
-                |err| warn!("Audio stream error: {}", err),
+                move |err| error_limiter.log(err),
                 None,
             )?,
             _ => device.build_output_stream(
-                &config,
+                config,
                 move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
                     let ts = info.timestamp();
-                    if let Some(latency) = ts.playback.duration_since(&ts.callback) {
-                        latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
-                    }
+                    let latency = ts.playback.duration_since(ts.callback);
+                    latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
                     for sample_out in data.iter_mut() {
                         *sample_out =
                             next_sample(&mut current_buffer, &mut buffer_pos, &mut resample_pos);
                     }
                 },
-                |err| warn!("Audio stream error: {}", err),
+                move |err| error_limiter.log(err),
                 None,
             )?,
         };

@@ -24,13 +24,7 @@ pub enum SendspinError {
     Config(String),
 
     #[error(transparent)]
-    Cpal(#[from] cpal::BuildStreamError),
-
-    #[error(transparent)]
-    CpalPlay(#[from] cpal::PlayStreamError),
-
-    #[error(transparent)]
-    CpalDevice(#[from] cpal::DefaultStreamConfigError),
+    Cpal(#[from] cpal::Error),
 
     #[error(transparent)]
     Mdns(#[from] mdns_sd::Error),

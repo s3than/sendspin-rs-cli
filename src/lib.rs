@@ -23,8 +23,8 @@ use sendspin::audio::decode::{Decoder, PcmDecoder, PcmEndian};
 use sendspin::audio::{AudioFormat, Codec};
 use sendspin::protocol::client::{AudioChunk, WsSender};
 use sendspin::protocol::messages::{
-    AudioFormatSpec, ClientState, ClientSyncState, GroupUpdate, Message, PlayerCommandType,
-    PlayerState, PlayerV1Support, ServerState,
+    AudioFormatSpec, ClientState, GroupUpdate, Message, PlayerCommandType, PlayerState,
+    PlayerV1Support, ServerState,
 };
 use sendspin::sync::ClockSync;
 use std::sync::Arc;
@@ -32,9 +32,18 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::error::SendspinError;
 
+// Routine player-state pushes (volume/mute changes, stream lifecycle events).
+// `state` is intentionally left `None` here: the top-level ClientState.state
+// field is reserved for genuine sync-state transitions (see
+// WsSender::send_sync_state/exit_external_source in the sendspin crate) — the
+// initial synchronized announcement plus full PlayerState (including timing
+// fields) is already sent once during connect via ProtocolClientBuilder's
+// initial_sync_state/initial_player_state (see build_client). Setting `state`
+// again on every routine update is what the server flags as "legacy top-level
+// 'state' field" usage.
 async fn send_player_state(ws_tx: &WsSender, volume: u8, muted: bool) {
     let state = Message::ClientState(ClientState {
-        state: Some(ClientSyncState::Synchronized),
+        state: None,
         player: Some(PlayerState {
             volume: Some(volume),
             muted: Some(muted),
@@ -51,8 +60,8 @@ async fn send_player_state(ws_tx: &WsSender, volume: u8, muted: bool) {
 struct Args {
     #[arg(short, long)]
     server: Option<String>,
-    /// Player name (saved to config; defaults to hostname)
-    #[arg(short, long)]
+    /// Player name (saved to config; defaults to hostname). Pass with no value to reset to the hostname default.
+    #[arg(short, long, num_args = 0..=1, default_missing_value = "")]
     name: Option<String>,
     /// Client ID (saved to config; pass "" to regenerate)
     #[arg(long)]
@@ -64,12 +73,12 @@ struct Args {
     reset_volume: bool,
     #[arg(short, long, default_value = "20")]
     buffer: u64,
-    /// Audio device buffer size in frames (0 = system default, try 4096 on Asahi Linux)
-    #[arg(long)]
+    /// Audio device buffer size in frames (0 = system default, try 4096 on Asahi Linux). Pass with no value to reset to the system default.
+    #[arg(long, num_args = 0..=1, default_missing_value = "0")]
     audio_buffer: Option<u32>,
-    /// ALSA device string for direct output, bypassing PipeWire (e.g. "plughw:0,0")
+    /// ALSA device string for direct output, bypassing PipeWire (e.g. "plughw:0,0"). Pass with no value to reset to the default (PipeWire/cpal) host.
     #[cfg(target_os = "linux")]
-    #[arg(short, long)]
+    #[arg(short, long, num_args = 0..=1, default_missing_value = "")]
     device: Option<String>,
 }
 
@@ -84,17 +93,28 @@ struct ResolvedConfig {
 fn resolve_config(args: &Args) -> ResolvedConfig {
     let saved = config::AppConfig::load();
 
-    // Resolve name: CLI arg > saved config > hostname
+    // Resolve name: non-empty CLI arg > saved config > hostname
+    // Pass --name with no value to reset to the hostname default.
+    let derive_hostname = || {
+        hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "Sendspin-RS Player".to_string())
+    };
     let name = match args.name.as_deref() {
         Some(n) if !n.is_empty() => {
             config::save_name(n);
             n.to_string()
         }
-        _ => saved.name.clone().unwrap_or_else(|| {
-            let hostname = hostname::get()
-                .ok()
-                .and_then(|h| h.into_string().ok())
-                .unwrap_or_else(|| "Sendspin-RS Player".to_string());
+        Some(_) => {
+            info!("Resetting saved player name to the hostname default");
+            config::clear_name();
+            let hostname = derive_hostname();
+            config::save_name(&hostname);
+            hostname
+        }
+        None => saved.name.clone().unwrap_or_else(|| {
+            let hostname = derive_hostname();
             config::save_name(&hostname);
             hostname
         }),
@@ -127,14 +147,20 @@ fn resolve_config(args: &Args) -> ResolvedConfig {
         args.volume.or(saved.player.volume).unwrap_or(30)
     };
 
-    // Resolve device: CLI arg > saved config > None (default host)
+    // Resolve device: non-empty CLI arg > saved config > None (default host)
+    // Pass --device with no value to reset to the default (PipeWire/cpal) host.
     #[cfg(target_os = "linux")]
     let device = match args.device.as_deref() {
         Some(d) if !d.is_empty() => {
             config::save_device(d);
             Some(d.to_string())
         }
-        _ => saved.player.device,
+        Some(_) => {
+            info!("Resetting saved audio device to the default host");
+            config::clear_device();
+            None
+        }
+        None => saved.player.device,
     };
     #[cfg(not(target_os = "linux"))]
     let device = None;
@@ -261,6 +287,7 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
         Message::ServerState(ServerState {
             metadata,
             controller,
+            ..
         }) => {
             if let Some(meta) = metadata {
                 let title = meta.title.as_deref().unwrap_or("Unknown");
@@ -370,7 +397,7 @@ fn detect_sleep(last_wall: &mut SystemTime, last_mono: &mut Instant) -> bool {
     false
 }
 
-fn build_client(config: &ResolvedConfig) -> ProtocolClientBuilder {
+fn build_client(config: &ResolvedConfig, buffer_ms: u64) -> ProtocolClientBuilder {
     ProtocolClientBuilder::builder()
         .client_id(config.client_id.clone())
         .name(config.name.clone())
@@ -411,7 +438,17 @@ fn build_client(config: &ResolvedConfig) -> ProtocolClientBuilder {
         .initial_player_state(PlayerState {
             volume: Some(config.volume),
             muted: Some(false),
-            ..Default::default()
+            // We don't compensate for external speaker/amplifier latency.
+            static_delay_ms: Some(0),
+            // `buffer_ms` (--buffer) is the lead time this client waits before
+            // starting playback of a new stream (see handle_audio_chunk) and
+            // doubles as our steady-state buffering target -- this app doesn't
+            // distinguish the two.
+            required_lead_time_ms: Some(buffer_ms as u32),
+            min_buffer_ms: Some(buffer_ms as u32),
+            // We don't implement PlayerCommandType::SetStaticDelay yet, so
+            // don't advertise support for it.
+            supported_commands: None,
         })
         .build()
 }
@@ -471,7 +508,7 @@ pub async fn run() -> Result<(), SendspinError> {
         let ws_url = format!("ws://{}/sendspin", server_addr);
         info!("Connecting to {}...", ws_url);
 
-        let client_builder = build_client(&resolved);
+        let client_builder = build_client(&resolved, buffer_ms);
 
         // Connect to server
         let connection = match client_builder.connect(&ws_url).await {
@@ -497,9 +534,10 @@ pub async fn run() -> Result<(), SendspinError> {
         reconnect_delay = Duration::from_secs(2);
         info!("Connected!");
 
-        // Send initial state
-        send_player_state(&ws_tx, player.volume(), false).await;
-        info!("Sent initial client/state");
+        // The initial client/state (sync state + full player state, including
+        // timing fields) was already sent during the handshake via
+        // ProtocolClientBuilder's initial_sync_state/initial_player_state (see
+        // build_client) -- no separate send needed here.
 
         info!("Waiting for stream to start...");
 
