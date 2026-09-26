@@ -51,8 +51,8 @@ async fn send_player_state(ws_tx: &WsSender, volume: u8, muted: bool) {
 struct Args {
     #[arg(short, long)]
     server: Option<String>,
-    /// Player name (saved to config; defaults to hostname)
-    #[arg(short, long)]
+    /// Player name (saved to config; defaults to hostname). Pass with no value to reset to the hostname default.
+    #[arg(short, long, num_args = 0..=1, default_missing_value = "")]
     name: Option<String>,
     /// Client ID (saved to config; pass "" to regenerate)
     #[arg(long)]
@@ -64,12 +64,12 @@ struct Args {
     reset_volume: bool,
     #[arg(short, long, default_value = "20")]
     buffer: u64,
-    /// Audio device buffer size in frames (0 = system default, try 4096 on Asahi Linux)
-    #[arg(long)]
+    /// Audio device buffer size in frames (0 = system default, try 4096 on Asahi Linux). Pass with no value to reset to the system default.
+    #[arg(long, num_args = 0..=1, default_missing_value = "0")]
     audio_buffer: Option<u32>,
-    /// ALSA device string for direct output, bypassing PipeWire (e.g. "plughw:0,0")
+    /// ALSA device string for direct output, bypassing PipeWire (e.g. "plughw:0,0"). Pass with no value to reset to the default (PipeWire/cpal) host.
     #[cfg(target_os = "linux")]
-    #[arg(short, long)]
+    #[arg(short, long, num_args = 0..=1, default_missing_value = "")]
     device: Option<String>,
 }
 
@@ -84,17 +84,28 @@ struct ResolvedConfig {
 fn resolve_config(args: &Args) -> ResolvedConfig {
     let saved = config::AppConfig::load();
 
-    // Resolve name: CLI arg > saved config > hostname
+    // Resolve name: non-empty CLI arg > saved config > hostname
+    // Pass --name with no value to reset to the hostname default.
+    let derive_hostname = || {
+        hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "Sendspin-RS Player".to_string())
+    };
     let name = match args.name.as_deref() {
         Some(n) if !n.is_empty() => {
             config::save_name(n);
             n.to_string()
         }
-        _ => saved.name.clone().unwrap_or_else(|| {
-            let hostname = hostname::get()
-                .ok()
-                .and_then(|h| h.into_string().ok())
-                .unwrap_or_else(|| "Sendspin-RS Player".to_string());
+        Some(_) => {
+            info!("Resetting saved player name to the hostname default");
+            config::clear_name();
+            let hostname = derive_hostname();
+            config::save_name(&hostname);
+            hostname
+        }
+        None => saved.name.clone().unwrap_or_else(|| {
+            let hostname = derive_hostname();
             config::save_name(&hostname);
             hostname
         }),
@@ -127,14 +138,20 @@ fn resolve_config(args: &Args) -> ResolvedConfig {
         args.volume.or(saved.player.volume).unwrap_or(30)
     };
 
-    // Resolve device: CLI arg > saved config > None (default host)
+    // Resolve device: non-empty CLI arg > saved config > None (default host)
+    // Pass --device with no value to reset to the default (PipeWire/cpal) host.
     #[cfg(target_os = "linux")]
     let device = match args.device.as_deref() {
         Some(d) if !d.is_empty() => {
             config::save_device(d);
             Some(d.to_string())
         }
-        _ => saved.player.device,
+        Some(_) => {
+            info!("Resetting saved audio device to the default host");
+            config::clear_device();
+            None
+        }
+        None => saved.player.device,
     };
     #[cfg(not(target_os = "linux"))]
     let device = None;

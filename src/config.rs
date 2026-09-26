@@ -91,6 +91,24 @@ pub fn save_client_id(id: &str) {
     }
 }
 
+/// Clear saved name from config file (falls back to the hostname default)
+pub fn clear_name() {
+    let mut config = AppConfig::load();
+    config.name = None;
+    if let Err(e) = config.save() {
+        warn!("Failed to clear name from config: {}", e);
+    }
+}
+
+/// Clear saved device from config file (falls back to the default audio host)
+pub fn clear_device() {
+    let mut config = AppConfig::load();
+    config.player.device = None;
+    if let Err(e) = config.save() {
+        warn!("Failed to clear device from config: {}", e);
+    }
+}
+
 /// Save device to config file
 pub fn save_device(device: &str) {
     let mut config = AppConfig::load();
