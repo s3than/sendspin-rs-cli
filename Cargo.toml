@@ -4,7 +4,7 @@ version = "0.0.9-beta"
 edition = "2024"
 
 [dependencies]
-sendspin = "0.3.6"
+sendspin = "0.3.7"
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
@@ -20,10 +20,14 @@ thiserror = "2"
 hostname = "0.4"
 parking_lot = "0.12"
 toml = "1.1"
-dirs = "6.0"
+dirs = "7.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cpal = { version = "0.18", features = ["pipewire"] }
+# Locked to 0.11 (not 0.12+): cpal's own ALSA backend depends on alsa "^0.11",
+# which pulls alsa-sys "^0.4". alsa 0.12 needs alsa-sys "^0.6", and Cargo's
+# `links = "alsa"` uniqueness rule forbids two alsa-sys versions in the same
+# build. Revisit once cpal bumps its own alsa dependency.
 alsa = "0.11"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
