@@ -23,8 +23,8 @@ use sendspin::audio::decode::{Decoder, PcmDecoder, PcmEndian};
 use sendspin::audio::{AudioFormat, Codec};
 use sendspin::protocol::client::{AudioChunk, WsSender};
 use sendspin::protocol::messages::{
-    AudioFormatSpec, ClientState, ClientSyncState, GroupUpdate, Message, PlayerCommandType,
-    PlayerState, PlayerV1Support, ServerState,
+    AudioFormatSpec, ClientState, GroupUpdate, Message, PlayerCommandType, PlayerState,
+    PlayerV1Support, ServerState,
 };
 use sendspin::sync::ClockSync;
 use std::sync::Arc;
@@ -32,9 +32,18 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::error::SendspinError;
 
+// Routine player-state pushes (volume/mute changes, stream lifecycle events).
+// `state` is intentionally left `None` here: the top-level ClientState.state
+// field is reserved for genuine sync-state transitions (see
+// WsSender::send_sync_state/exit_external_source in the sendspin crate) — the
+// initial synchronized announcement plus full PlayerState (including timing
+// fields) is already sent once during connect via ProtocolClientBuilder's
+// initial_sync_state/initial_player_state (see build_client). Setting `state`
+// again on every routine update is what the server flags as "legacy top-level
+// 'state' field" usage.
 async fn send_player_state(ws_tx: &WsSender, volume: u8, muted: bool) {
     let state = Message::ClientState(ClientState {
-        state: Some(ClientSyncState::Synchronized),
+        state: None,
         player: Some(PlayerState {
             volume: Some(volume),
             muted: Some(muted),
@@ -278,6 +287,7 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
         Message::ServerState(ServerState {
             metadata,
             controller,
+            ..
         }) => {
             if let Some(meta) = metadata {
                 let title = meta.title.as_deref().unwrap_or("Unknown");
@@ -387,7 +397,7 @@ fn detect_sleep(last_wall: &mut SystemTime, last_mono: &mut Instant) -> bool {
     false
 }
 
-fn build_client(config: &ResolvedConfig) -> ProtocolClientBuilder {
+fn build_client(config: &ResolvedConfig, buffer_ms: u64) -> ProtocolClientBuilder {
     ProtocolClientBuilder::builder()
         .client_id(config.client_id.clone())
         .name(config.name.clone())
@@ -428,7 +438,17 @@ fn build_client(config: &ResolvedConfig) -> ProtocolClientBuilder {
         .initial_player_state(PlayerState {
             volume: Some(config.volume),
             muted: Some(false),
-            ..Default::default()
+            // We don't compensate for external speaker/amplifier latency.
+            static_delay_ms: Some(0),
+            // `buffer_ms` (--buffer) is the lead time this client waits before
+            // starting playback of a new stream (see handle_audio_chunk) and
+            // doubles as our steady-state buffering target -- this app doesn't
+            // distinguish the two.
+            required_lead_time_ms: Some(buffer_ms as u32),
+            min_buffer_ms: Some(buffer_ms as u32),
+            // We don't implement PlayerCommandType::SetStaticDelay yet, so
+            // don't advertise support for it.
+            supported_commands: None,
         })
         .build()
 }
@@ -488,7 +508,7 @@ pub async fn run() -> Result<(), SendspinError> {
         let ws_url = format!("ws://{}/sendspin", server_addr);
         info!("Connecting to {}...", ws_url);
 
-        let client_builder = build_client(&resolved);
+        let client_builder = build_client(&resolved, buffer_ms);
 
         // Connect to server
         let connection = match client_builder.connect(&ws_url).await {
@@ -514,9 +534,10 @@ pub async fn run() -> Result<(), SendspinError> {
         reconnect_delay = Duration::from_secs(2);
         info!("Connected!");
 
-        // Send initial state
-        send_player_state(&ws_tx, player.volume(), false).await;
-        info!("Sent initial client/state");
+        // The initial client/state (sync state + full player state, including
+        // timing fields) was already sent during the handshake via
+        // ProtocolClientBuilder's initial_sync_state/initial_player_state (see
+        // build_client) -- no separate send needed here.
 
         info!("Waiting for stream to start...");
 
